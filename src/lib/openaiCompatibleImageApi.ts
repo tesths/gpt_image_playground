@@ -93,6 +93,33 @@ function isEventStreamResponse(response: Response): boolean {
   return response.headers.get('Content-Type')?.toLowerCase().includes('text/event-stream') ?? false
 }
 
+function isRelayEventStreamJsonError(payload: unknown): boolean {
+  if (!isRecordValue(payload)) return false
+  const error = payload.error
+  if (!isRecordValue(error)) return false
+
+  const type = getStringValue(error, 'type')
+  const status = getNumberValue(error, 'status')
+  const contentType = getStringValue(error, 'contentType')?.toLowerCase() ?? ''
+  const message = getStringValue(error, 'message') ?? ''
+  return type === 'upstream_non_json' &&
+    status === 200 &&
+    contentType.includes('text/event-stream') &&
+    message.includes('非 JSON')
+}
+
+async function shouldRetryWithoutStreaming(response: Response, profile: ApiProfile): Promise<boolean> {
+  if (!profile.streamImages) return false
+  const contentType = response.headers.get('Content-Type')?.toLowerCase() ?? ''
+  if (!contentType.includes('application/json')) return false
+
+  try {
+    return isRelayEventStreamJsonError(await response.clone().json())
+  } catch {
+    return false
+  }
+}
+
 function isRecordValue(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
 }
@@ -669,6 +696,10 @@ async function callImagesApiSingle(opts: CallApiOptions, profile: ApiProfile): P
       })
     }
 
+    if (await shouldRetryWithoutStreaming(response, profile)) {
+      return callImagesApiSingle(opts, { ...profile, streamImages: false })
+    }
+
     if (!response.ok) {
       const errorMessage = await getApiErrorMessage(response)
       throw new Error(maybeAppendStreamingHint(errorMessage, response.status, profile.streamImages))
@@ -1075,6 +1106,10 @@ async function callResponsesImageApiSingle(opts: CallApiOptions, profile: ApiPro
       body: JSON.stringify(body),
       signal: controller.signal,
     })
+
+    if (await shouldRetryWithoutStreaming(response, profile)) {
+      return callResponsesImageApiSingle(opts, { ...profile, streamImages: false })
+    }
 
     if (!response.ok) {
       const errorMessage = await getApiErrorMessage(response)
