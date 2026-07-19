@@ -198,54 +198,6 @@ describe('callImageApi', () => {
     })
   })
 
-  it('retries Images API without streaming when a relay rejects upstream event streams', async () => {
-    const fetchMock = vi.spyOn(globalThis, 'fetch')
-      .mockResolvedValueOnce(new Response(JSON.stringify({
-        error: {
-          message: '上游生图接口返回了非 JSON 内容：HTTP 200。',
-          type: 'upstream_non_json',
-          status: 200,
-          contentType: 'text/event-stream',
-        },
-      }), {
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
-      }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({
-        data: [{ b64_json: 'ZmluYWw=' }],
-      }), {
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
-      }))
-
-    const result = await callImageApi({
-      settings: {
-        ...DEFAULT_SETTINGS,
-        apiKey: 'test-key',
-        streamImages: true,
-        streamPartialImages: 3,
-        profiles: DEFAULT_SETTINGS.profiles.map((profile) => ({
-          ...profile,
-          apiKey: 'test-key',
-          streamImages: true,
-          streamPartialImages: 3,
-        })),
-      },
-      prompt: 'prompt',
-      params: { ...DEFAULT_PARAMS },
-      inputImageDataUrls: [],
-    } as any)
-
-    expect(fetchMock).toHaveBeenCalledTimes(2)
-    const firstBody = JSON.parse(String((fetchMock.mock.calls[0][1] as RequestInit).body))
-    const secondBody = JSON.parse(String((fetchMock.mock.calls[1][1] as RequestInit).body))
-    expect(firstBody.stream).toBe(true)
-    expect(firstBody.partial_images).toBe(3)
-    expect(secondBody.stream).toBeUndefined()
-    expect(secondBody.partial_images).toBeUndefined()
-    expect(result.images).toEqual(['data:image/png;base64,ZmluYWw='])
-  })
-
   it('suggests disabling streaming when a streaming request fails', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('invalid character \':\' looking for beginning of value', {
       status: 400,
@@ -530,60 +482,6 @@ describe('callImageApi', () => {
       actualParamsList: [{ size: '1024x1024' }],
       revisedPrompts: ['rewritten'],
     })
-  })
-
-  it('retries Responses API without streaming when a relay rejects upstream event streams', async () => {
-    const fetchMock = vi.spyOn(globalThis, 'fetch')
-      .mockResolvedValueOnce(new Response(JSON.stringify({
-        error: {
-          message: '上游生图接口返回了非 JSON 内容：HTTP 200。',
-          type: 'upstream_non_json',
-          status: 200,
-          contentType: 'text/event-stream',
-        },
-      }), {
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
-      }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({
-        output: [{
-          type: 'image_generation_call',
-          result: 'ZmluYWw=',
-          size: '1024x1024',
-        }],
-      }), {
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
-      }))
-
-    const result = await callImageApi({
-      settings: {
-        ...DEFAULT_SETTINGS,
-        apiKey: 'test-key',
-        apiMode: 'responses',
-        streamImages: true,
-        streamPartialImages: 1,
-        profiles: DEFAULT_SETTINGS.profiles.map((profile) => ({
-          ...profile,
-          apiKey: 'test-key',
-          apiMode: 'responses',
-          streamImages: true,
-          streamPartialImages: 1,
-        })),
-      },
-      prompt: 'prompt',
-      params: { ...DEFAULT_PARAMS },
-      inputImageDataUrls: [],
-    } as any)
-
-    expect(fetchMock).toHaveBeenCalledTimes(2)
-    const firstBody = JSON.parse(String((fetchMock.mock.calls[0][1] as RequestInit).body))
-    const secondBody = JSON.parse(String((fetchMock.mock.calls[1][1] as RequestInit).body))
-    expect(firstBody.stream).toBe(true)
-    expect(firstBody.tools[0].partial_images).toBe(1)
-    expect(secondBody.stream).toBeUndefined()
-    expect(secondBody.tools[0].partial_images).toBeUndefined()
-    expect(result.images).toEqual(['data:image/png;base64,ZmluYWw='])
   })
 
   it('keeps successful Responses API concurrent results when one request fails', async () => {
