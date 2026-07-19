@@ -7,6 +7,9 @@ import {
 } from '../src/lib/vercelProxy'
 
 const API_PROXY_ALLOW = 'GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS'
+const serverEnv = (globalThis as typeof globalThis & {
+  process?: { env?: Record<string, string | undefined> }
+}).process?.env ?? {}
 
 async function handle(request: Request): Promise<Response> {
   if (request.method === 'OPTIONS') {
@@ -22,8 +25,8 @@ async function handle(request: Request): Promise<Response> {
   try {
     const url = new URL(request.url)
     const baseUrl = resolveApiProxyBaseUrl(
-      process.env.API_PROXY_URL,
-      process.env.API_PROXY_ALLOWLIST,
+      serverEnv.API_PROXY_URL,
+      serverEnv.API_PROXY_ALLOWLIST,
       request.headers.get('x-api-proxy-target'),
     )
     const targetUrl = buildApiProxyUrl(baseUrl, url.searchParams.get('path'), url.searchParams)

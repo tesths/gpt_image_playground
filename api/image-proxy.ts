@@ -6,9 +6,12 @@ import {
 
 const IMAGE_PROXY_ALLOW = 'GET, HEAD, OPTIONS'
 const MAX_IMAGE_PROXY_REDIRECTS = 5
+const serverEnv = (globalThis as typeof globalThis & {
+  process?: { env?: Record<string, string | undefined> }
+}).process?.env ?? {}
 
 async function fetchAllowlistedImage(rawUrl: string, request: Request): Promise<Response> {
-  let targetUrl = resolveImageProxyUrl(rawUrl, process.env.IMAGE_PROXY_ALLOWLIST)
+  let targetUrl = resolveImageProxyUrl(rawUrl, serverEnv.IMAGE_PROXY_ALLOWLIST)
 
   for (let i = 0; i <= MAX_IMAGE_PROXY_REDIRECTS; i++) {
     const response = await fetch(targetUrl, {
@@ -23,7 +26,7 @@ async function fetchAllowlistedImage(rawUrl: string, request: Request): Promise<
 
     const location = response.headers.get('Location')
     if (!location) throw new Error('图片 URL 重定向响应缺少 Location。')
-    targetUrl = resolveImageProxyUrl(new URL(location, targetUrl).toString(), process.env.IMAGE_PROXY_ALLOWLIST)
+    targetUrl = resolveImageProxyUrl(new URL(location, targetUrl).toString(), serverEnv.IMAGE_PROXY_ALLOWLIST)
   }
 
   throw new Error('图片 URL 重定向次数过多。')
