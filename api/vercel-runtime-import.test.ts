@@ -9,9 +9,12 @@ const functionFiles = [
 ]
 
 describe('vercel function runtime imports', () => {
-  it('uses explicit TS extensions for api-to-src imports', () => {
+  it('uses the runtime JS helper instead of importing src TS files', () => {
     for (const file of functionFiles) {
-      expect(readFileSync(resolve(file), 'utf-8')).not.toMatch(/from ['"]\.\.\/src\/lib\/vercelProxy['"]/)
+      const source = readFileSync(resolve(file), 'utf-8')
+      expect(source).toContain("from '../api-shared/vercelProxy.js'")
+      expect(source).not.toMatch(/from ['"]\.\.\/src\//)
+      expect(source).not.toMatch(/from ['"][^'"]+\.ts['"]/)
     }
   })
 

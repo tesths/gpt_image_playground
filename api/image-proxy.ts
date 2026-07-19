@@ -2,7 +2,7 @@ import {
   createProxyErrorResponse,
   createProxyResponseHeaders,
   resolveImageProxyUrl,
-} from '../src/lib/vercelProxy.ts'
+} from '../api-shared/vercelProxy.js'
 
 const IMAGE_PROXY_ALLOW = 'GET, HEAD, OPTIONS'
 const MAX_IMAGE_PROXY_REDIRECTS = 5
