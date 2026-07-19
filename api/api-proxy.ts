@@ -4,7 +4,7 @@ import {
   createProxyRequestHeaders,
   createProxyResponseHeaders,
   resolveApiProxyBaseUrl,
-} from '../src/lib/vercelProxy'
+} from '../src/lib/vercelProxy.ts'
 
 const API_PROXY_ALLOW = 'GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS'
 const serverEnv = (globalThis as typeof globalThis & {
