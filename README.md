@@ -179,6 +179,18 @@
 
 **仅展示默认配置**：设置 `VITE_SHOW_DEFAULT_CONFIG_ONLY=true` 后，如果已配置默认 API URL 或默认代理，前端会禁用“当前配置”和“服务商类型”的下拉切换，只允许使用默认配置和默认服务商类型。通过页面 URL 参数传入的配置只会覆盖当前配置字段，不会新建配置、切换服务商类型或导入自定义服务商；`VITE_DEFAULT_API_URL` 本身仍可使用配置 URL 来定义部署端默认服务商。
 
+**启用 Vercel 同源代理**：如果 API 或返回的图片 URL 不支持浏览器跨域，可在 Vercel 项目的 **Settings → Environment Variables** 中添加：
+
+```env
+VITE_API_PROXY_AVAILABLE=true
+API_PROXY_URL=https://api.example.com/v1
+API_PROXY_ALLOWLIST=https://api.example.com/v1,https://backup-api.example.com/v1
+VITE_IMAGE_PROXY_AVAILABLE=true
+IMAGE_PROXY_ALLOWLIST=oaidalleapiprodscus.blob.core.windows.net,cdn.example.com
+```
+
+开启后，前端的 **API 代理** 会请求同源 `/api-proxy/...`，由 Vercel Function 转发到白名单中的上游。`API_PROXY_ALLOWLIST` 支持填写多个完整 API Base URL（逗号或换行分隔）；不锁定代理时，不同 API 配置的 `API URL` 可在这些上游之间切换。若 API 返回的图片 URL 因 CORS 下载失败，前端会自动尝试通过同源 `/api/image-proxy?url=...` 下载。`IMAGE_PROXY_ALLOWLIST` 支持精确域名（如 `cdn.example.com`）、通配子域名（如 `*.example.com`）或 URL 路径前缀（如 `https://cdn.example.com/generated`）。两个白名单都必须只填写可信上游，避免把部署变成开放代理。
+
 **绑定自定义域名 (国内直连)**：Vercel 默认分配的 `.vercel.app` 域名在国内通常无法直接访问。如果你希望在国内直连访问，请在 Vercel 项目的 **Settings → Domains** 中绑定你自己的域名。
 
 **配置自动更新**：

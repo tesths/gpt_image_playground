@@ -1,5 +1,6 @@
 import type { AppSettings, TaskParams } from '../types'
 import { blobToDataUrl } from './dataUrl'
+import { readRuntimeEnv } from './runtimeEnv'
 
 export const MIME_MAP: Record<string, string> = {
   png: 'image/png',
@@ -88,6 +89,14 @@ export const IMAGE_FETCH_CORS_HINT = ' 可点链接按钮复制结果链接，�
 export const STREAMING_UNSUPPORTED_HINT = '提示：当前使用的 API 可能不支持流式传输，请尝试关闭「流式传输」功能。'
 export const STREAMING_FORMAT_HINT = '提示：API 返回了无法解析的流式数据格式，请尝试关闭「流式传输」功能。'
 
+function isImageProxyAvailable(): boolean {
+  return readRuntimeEnv(import.meta.env.VITE_IMAGE_PROXY_AVAILABLE) === 'true'
+}
+
+function buildImageProxyUrl(url: string): string {
+  return `/api/image-proxy?url=${encodeURIComponent(url)}`
+}
+
 export function appendStreamingUnsupportedHint(message: string): string {
   return message ? `${message}\n${STREAMING_UNSUPPORTED_HINT}` : STREAMING_UNSUPPORTED_HINT
 }
@@ -134,16 +143,29 @@ export async function fetchImageUrlAsDataUrl(url: string, fallbackMime: string, 
     })
   } catch (err) {
     if (err instanceof TypeError) {
-      const probe = await probeNoCorsReachability(url)
-      if (probe === 'opaque') {
-        throw new Error(`图片已生成，但因服务商未允许跨域，图片链接下载失败。${IMAGE_FETCH_CORS_HINT}`)
+      if (isImageProxyAvailable()) {
+        try {
+          response = await fetch(buildImageProxyUrl(url), {
+            cache: 'no-store',
+            signal,
+          })
+        } catch (proxyErr) {
+          const message = proxyErr instanceof Error ? proxyErr.message : String(proxyErr)
+          throw new Error(`图片已生成，但通过同源代理下载失败：${message}。${IMAGE_FETCH_CORS_HINT}`)
+        }
+      } else {
+        const probe = await probeNoCorsReachability(url)
+        if (probe === 'opaque') {
+          throw new Error(`图片已生成，但因服务商未允许跨域，图片链接下载失败。${IMAGE_FETCH_CORS_HINT}`)
+        }
+        if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+          throw new Error(`图片链接下载失败（网络不可用）。${IMAGE_FETCH_CORS_HINT}`)
+        }
+        throw new Error(`图片链接下载失败（可能因跨域限制、链接过期或网络异常）。${IMAGE_FETCH_CORS_HINT}`)
       }
-      if (typeof navigator !== 'undefined' && navigator.onLine === false) {
-        throw new Error(`图片链接下载失败（网络不可用）。${IMAGE_FETCH_CORS_HINT}`)
-      }
-      throw new Error(`图片链接下载失败（可能因跨域限制、链接过期或网络异常）。${IMAGE_FETCH_CORS_HINT}`)
+    } else {
+      throw err
     }
-    throw err
   }
 
   if (!response.ok) {

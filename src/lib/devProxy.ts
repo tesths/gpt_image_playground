@@ -9,6 +9,7 @@ export interface DevProxyConfig {
 }
 
 const DEFAULT_PROXY_PREFIX = '/api-proxy'
+export const API_PROXY_TARGET_HEADER = 'X-Api-Proxy-Target'
 
 export function normalizeBaseUrl(baseUrl: string): string {
   const trimmed = baseUrl.trim()
@@ -96,4 +97,10 @@ export function isApiProxyLocked(proxyConfig: DevProxyConfig | null = readClient
 
 export function shouldUseApiProxy(apiProxy: boolean, proxyConfig: DevProxyConfig | null = readClientDevProxyConfig()): boolean {
   return isApiProxyAvailable(proxyConfig) && (apiProxy || isApiProxyLocked(proxyConfig))
+}
+
+export function createApiProxyTargetHeaders(baseUrl: string, proxyConfig: DevProxyConfig | null, useApiProxy: boolean): Record<string, string> {
+  const target = normalizeBaseUrl(baseUrl)
+  if (!useApiProxy || proxyConfig?.enabled || isApiProxyLocked(proxyConfig) || !target) return {}
+  return { [API_PROXY_TARGET_HEADER]: target }
 }

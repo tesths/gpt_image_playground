@@ -602,6 +602,9 @@ describe('callImageApi', () => {
       '/api-proxy/images/generations',
       expect.objectContaining({ method: 'POST' }),
     )
+    expect((fetchMock.mock.calls[0][1] as RequestInit).headers).toMatchObject({
+      'X-Api-Proxy-Target': 'http://api.example.com/v1',
+    })
   })
 
   it('uses the same-origin API proxy path when API proxy is enabled and base URL is empty', async () => {
