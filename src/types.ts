@@ -40,6 +40,7 @@ export interface CustomProviderSubmitMapping {
   path: string
   method?: CustomProviderRequestMethod
   contentType?: CustomProviderContentType
+  concurrent?: boolean
   query?: Record<string, string>
   body?: Record<string, unknown>
   files?: CustomProviderFileMapping[]

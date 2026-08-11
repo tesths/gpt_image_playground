@@ -753,6 +753,59 @@ describe('callImageApi', () => {
     )
   })
 
+  it('splits sync custom providers into concurrent single-image requests when enabled', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify({
+      data: [{ b64_json: 'aW1hZ2U=' }],
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }))
+
+    const result = await callImageApi({
+      settings: {
+        ...DEFAULT_SETTINGS,
+        customProviders: [{
+          id: 'custom-concurrent',
+          name: 'Custom Concurrent',
+          template: 'http-image',
+          submit: {
+            path: 'custom/images',
+            method: 'POST',
+            contentType: 'json',
+            concurrent: true,
+            body: { model: '$profile.model', prompt: '$prompt', n: '$params.n' },
+            result: { b64JsonPaths: ['data.*.b64_json'] },
+          },
+        }],
+        profiles: [{
+          ...DEFAULT_SETTINGS.profiles[0],
+          id: 'profile-custom-concurrent',
+          provider: 'custom-concurrent',
+          baseUrl: 'https://api.example.com/v1',
+          apiKey: 'test-key',
+          model: 'model',
+        }],
+        activeProfileId: 'profile-custom-concurrent',
+      },
+      prompt: 'prompt',
+      params: { ...DEFAULT_PARAMS, n: 4 },
+      inputImageDataUrls: [],
+    })
+
+    expect(fetchMock).toHaveBeenCalledTimes(4)
+    expect(result.images).toEqual([
+      'data:image/png;base64,aW1hZ2U=',
+      'data:image/png;base64,aW1hZ2U=',
+      'data:image/png;base64,aW1hZ2U=',
+      'data:image/png;base64,aW1hZ2U=',
+    ])
+    expect(result.actualParams).toMatchObject({ n: 4 })
+    for (const [, init] of fetchMock.mock.calls) {
+      const body = JSON.parse(String((init as RequestInit).body))
+      expect(body.n).toBe(1)
+    }
+  })
+
   it('rejects API proxy for async custom providers', async () => {
     vi.stubEnv('VITE_API_PROXY_AVAILABLE', 'true')
     const fetchMock = vi.spyOn(globalThis, 'fetch')

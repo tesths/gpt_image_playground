@@ -181,6 +181,7 @@ function normalizeSubmitMapping(value: unknown, fallback: CustomProviderSubmitMa
     path: normalizeProviderPath(record.path, fallback.path),
     method: normalizeRequestMethod(record.method, fallback.method ?? 'POST'),
     contentType,
+    concurrent: record.concurrent === true || fallback.concurrent === true ? true : undefined,
     query: normalizeStringRecord(record.query) ?? fallback.query,
     body: normalizeBodyTemplate(record.body, fallback.body ?? (contentType === 'multipart' ? DEFAULT_EDIT_BODY : DEFAULT_GENERATE_BODY)),
     files: contentType === 'multipart' ? normalizeFileMappings(record.files, fallback.files) : undefined,

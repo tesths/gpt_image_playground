@@ -817,6 +817,54 @@ async function submitCustomRequest(mapping: CustomProviderSubmitMapping, opts: C
   return response.json()
 }
 
+async function callCustomHttpImageApiConcurrent(
+  opts: CallApiOptions,
+  profile: ApiProfile,
+  submitMapping: CustomProviderSubmitMapping,
+  mime: string,
+  controller: AbortController,
+  proxyConfig: ReturnType<typeof readClientDevProxyConfig>,
+  useApiProxy: boolean,
+  n: number,
+): Promise<CallApiResult> {
+  const singleOpts = {
+    ...opts,
+    params: {
+      ...opts.params,
+      n: 1,
+    },
+  }
+  const results = await Promise.allSettled(
+    Array.from({ length: n }).map(async () => {
+      const payload = await submitCustomRequest(submitMapping, singleOpts, profile, controller, proxyConfig, useApiProxy)
+      return extractCustomImages(payload, submitMapping.result ?? {}, mime, controller.signal)
+    }),
+  )
+
+  const successfulResults = results
+    .filter((r): r is PromiseFulfilledResult<CallApiResult> => r.status === 'fulfilled')
+    .map((r) => r.value)
+  const failedRequests = results.flatMap((r, requestIndex) =>
+    r.status === 'rejected' ? [{ requestIndex, error: getErrorMessage(r.reason) }] : [],
+  )
+
+  if (successfulResults.length === 0) {
+    const firstError = results.find((r): r is PromiseRejectedResult => r.status === 'rejected')
+    if (firstError) throw firstError.reason
+    throw new Error('所有并发请求均失败')
+  }
+
+  const images = successfulResults.flatMap((r) => r.images)
+  const rawImageUrls = successfulResults.flatMap((r) => r.rawImageUrls ?? [])
+
+  return {
+    images,
+    actualParams: mergeActualParams(successfulResults[0]?.actualParams, { n: images.length }),
+    ...(rawImageUrls.length ? { rawImageUrls } : {}),
+    ...(failedRequests.length ? { failedRequests } : {}),
+  }
+}
+
 async function pollCustomTaskResult(
   profile: ApiProfile,
   poll: CustomProviderPollMapping,
@@ -901,6 +949,10 @@ async function callCustomHttpImageApi(opts: CallApiOptions, profile: ApiProfile,
     }
     if (useApiProxy && (submitMapping.taskIdPath || customProvider.poll)) {
       throw new Error('API 代理暂不支持使用异步任务的自定义服务商。请关闭 API 代理，或改用同步返回图片的自定义服务商配置。')
+    }
+    const n = params.n > 0 ? params.n : 1
+    if (submitMapping.concurrent && !submitMapping.taskIdPath && !customProvider.poll && n > 1) {
+      return callCustomHttpImageApiConcurrent(opts, profile, submitMapping, mime, controller, proxyConfig, useApiProxy, n)
     }
     const submitPayload = await submitCustomRequest(submitMapping, opts, profile, controller, proxyConfig, useApiProxy)
     const taskIdValue = submitMapping.taskIdPath ? getByPath(submitPayload, submitMapping.taskIdPath) : undefined

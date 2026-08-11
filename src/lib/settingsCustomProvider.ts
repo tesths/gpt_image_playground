@@ -71,6 +71,7 @@ submit/editSubmit 字段：
 - path：接口路径，不带开头斜杠，不带 /v1/ 前缀，例如 images/generations 或 tasks/{task_id}。
 - method：GET 或 POST，默认 POST。
 - contentType：json 或 multipart。
+- concurrent：可选，仅同步接口使用；如果接口忽略 n 或一次只返回 1 张图，设为 true，应用会在用户选择多张时并发提交多个 n=1 请求。
 - query：提交 query 参数对象，可选，例如 {"async":"true"}。
 - body：请求体模板对象。
 - files：multipart 文件字段数组，仅 contentType=multipart 时使用。
@@ -120,6 +121,7 @@ profiles 中不要包含 apiKey（用户导入后自行填写）。
 - 代码块外不要附加解释文字。
 - 不要输出 API Key、Authorization header。
 - 如果文档返回 task_id，就必须配置 taskIdPath 和 poll。
+- 如果同步接口文档说明不支持 n，或实际一次只返回 1 张图，在 submit/editSubmit 中加入 "concurrent": true。
 - 如果结果 URL 是数组，路径必须写到数组元素，例如 data.result.images.*.url.*。
 
 ## 同步接口示例
