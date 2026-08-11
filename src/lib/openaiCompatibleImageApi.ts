@@ -826,6 +826,7 @@ async function callCustomHttpImageApiConcurrent(
   proxyConfig: ReturnType<typeof readClientDevProxyConfig>,
   useApiProxy: boolean,
   n: number,
+  options: { requestIndexOffset?: number; allowAllFailed?: boolean } = {},
 ): Promise<CallApiResult> {
   const singleOpts = {
     ...opts,
@@ -845,10 +846,11 @@ async function callCustomHttpImageApiConcurrent(
     .filter((r): r is PromiseFulfilledResult<CallApiResult> => r.status === 'fulfilled')
     .map((r) => r.value)
   const failedRequests = results.flatMap((r, requestIndex) =>
-    r.status === 'rejected' ? [{ requestIndex, error: getErrorMessage(r.reason) }] : [],
+    r.status === 'rejected' ? [{ requestIndex: requestIndex + (options.requestIndexOffset ?? 0), error: getErrorMessage(r.reason) }] : [],
   )
 
   if (successfulResults.length === 0) {
+    if (options.allowAllFailed) return { images: [], ...(failedRequests.length ? { failedRequests } : {}) }
     const firstError = results.find((r): r is PromiseRejectedResult => r.status === 'rejected')
     if (firstError) throw firstError.reason
     throw new Error('所有并发请求均失败')
@@ -962,7 +964,25 @@ async function callCustomHttpImageApi(opts: CallApiOptions, profile: ApiProfile,
       ;(err as any).rawResponsePayload = JSON.stringify(submitPayload, null, 2)
       throw err
     }
-    if (!taskId) return extractCustomImages(submitPayload, submitMapping.result ?? {}, mime, controller.signal)
+    if (!taskId) {
+      const result = await extractCustomImages(submitPayload, submitMapping.result ?? {}, mime, controller.signal)
+      if (n <= 1 || result.images.length >= n) return result
+
+      const topUpResult = await callCustomHttpImageApiConcurrent(opts, profile, submitMapping, mime, controller, proxyConfig, useApiProxy, n - result.images.length, {
+        requestIndexOffset: result.images.length,
+        allowAllFailed: true,
+      })
+      const images = [...result.images, ...topUpResult.images]
+      const rawImageUrls = [...(result.rawImageUrls ?? []), ...(topUpResult.rawImageUrls ?? [])]
+      const failedRequests = topUpResult.failedRequests ?? []
+
+      return {
+        images,
+        actualParams: mergeActualParams(result.actualParams, topUpResult.actualParams, { n: images.length }),
+        ...(rawImageUrls.length ? { rawImageUrls } : {}),
+        ...(failedRequests.length ? { failedRequests } : {}),
+      }
+    }
     if (!customProvider.poll) throw new Error('异步接口返回了 task_id，但服务商配置缺少 poll')
     opts.onCustomTaskEnqueued?.({ taskId })
     if (timeoutId) {
