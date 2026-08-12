@@ -1050,7 +1050,7 @@ function usesConcurrentOpenAIImageRequests(profile: ApiProfile, params: TaskPara
   const n = params.n > 0 ? params.n : 1
   if (profile.provider !== 'openai' || n <= 1) return false
   if (profile.apiMode === 'responses') return true
-  return profile.apiMode === 'images' && (profile.codexCli || profile.streamImages)
+  return profile.apiMode === 'images'
 }
 
 export function taskHasOutputErrors(task: Pick<TaskRecord, 'outputErrors'>) {

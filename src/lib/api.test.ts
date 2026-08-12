@@ -477,6 +477,50 @@ describe('callImageApi', () => {
     ])
   })
 
+  it('splits Images API requests into concurrent single-image requests when n is greater than 1', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+      const callIndex = fetchMock.mock.calls.length
+      return new Response(JSON.stringify({
+        data: [{ b64_json: `aW1hZ2Ut${callIndex}` }],
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    })
+
+    const result = await callImageApi({
+      settings: {
+        ...DEFAULT_SETTINGS,
+        apiKey: 'test-key',
+        apiMode: 'images',
+        codexCli: false,
+        streamImages: false,
+        profiles: DEFAULT_SETTINGS.profiles.map((profile) => ({
+          ...profile,
+          apiKey: 'test-key',
+          apiMode: 'images',
+          codexCli: false,
+          streamImages: false,
+        })),
+      },
+      prompt: 'prompt',
+      params: { ...DEFAULT_PARAMS, n: 3 },
+      inputImageDataUrls: [],
+    })
+
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+    for (const [, init] of fetchMock.mock.calls) {
+      const body = JSON.parse(String((init as RequestInit).body))
+      expect(body.n).toBeUndefined()
+    }
+    expect(result.images).toEqual([
+      'data:image/png;base64,aW1hZ2Ut1',
+      'data:image/png;base64,aW1hZ2Ut2',
+      'data:image/png;base64,aW1hZ2Ut3',
+    ])
+    expect(result.actualParams).toMatchObject({ n: 3 })
+  })
+
   it('keeps successful Images API concurrent results when one request fails', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
       const callIndex = fetchMock.mock.calls.length
