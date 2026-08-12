@@ -386,6 +386,45 @@ describe('mask draft lifecycle in store actions', () => {
     await clearImages()
   })
 
+  it('splits gallery custom provider multi-count requests on the client', async () => {
+    const { callImageApi } = await import('./lib/api')
+    const customProfile = {
+      ...createDefaultOpenAIProfile({ id: 'custom-profile', apiKey: 'custom-key', apiMode: 'images' }),
+      provider: 'custom-sync',
+    }
+    vi.mocked(callImageApi).mockClear()
+    vi.mocked(callImageApi).mockImplementation(async () => ({
+      images: [`data:image/png;base64,custom-${vi.mocked(callImageApi).mock.calls.length}`],
+      actualParams: {},
+      actualParamsList: [{}],
+      revisedPrompts: [],
+    }))
+    useStore.setState({
+      settings: normalizeSettings({
+        ...DEFAULT_SETTINGS,
+        profiles: [customProfile],
+        activeProfileId: customProfile.id,
+        customProviders: [{
+          id: 'custom-sync',
+          name: 'Custom Sync',
+          submit: { path: 'submit', result: { b64JsonPaths: ['data.*.b64_json'] } },
+        }],
+      }),
+      appMode: 'gallery',
+      prompt: 'prompt',
+      params: { ...DEFAULT_PARAMS, n: 3 },
+    })
+
+    await submitTask()
+    await vi.waitFor(() => expect(useStore.getState().tasks[0]?.status).toBe('done'))
+
+    const [task] = useStore.getState().tasks
+    expect(callImageApi).toHaveBeenCalledTimes(3)
+    expect(vi.mocked(callImageApi).mock.calls.map(([opts]) => opts.params.n)).toEqual([1, 1, 1])
+    expect(task.outputImages).toHaveLength(3)
+    expect(task.actualParams).toMatchObject({ n: 3 })
+  })
+
   it('stores transparent background output after local post-processing', async () => {
     const { callImageApi } = await import('./lib/api')
     vi.mocked(callImageApi).mockClear()

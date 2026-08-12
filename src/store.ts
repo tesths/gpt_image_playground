@@ -43,7 +43,7 @@ import {
   storeImage,
   storeImageWithSize,
 } from './lib/db'
-import { callImageApi } from './lib/api'
+import { callImageApi, type CallApiResult } from './lib/api'
 import { callAgentConversationTitleApi, callAgentResponsesApi, callBatchImageSingle, parseBatchImageCallArguments, type AgentApiResultImage } from './lib/agentApi'
 import { buildAgentApiInput, buildAgentContinuationInput } from './lib/agentInputBuilder'
 import { collectAgentRoundOutputImageSlots, extractAgentReferenceIds, getAgentCurrentReferenceId, getAgentGeneratedImageReferenceId } from './lib/agentImageReferences'
@@ -3487,10 +3487,11 @@ async function executeTask(taskId: string) {
       ? task.transparentPrompt
       : task.prompt
 
-    const result = await callImageApi({
+    const apiPrompt = replaceImageMentionsForApi(requestPrompt, inputDataUrls.length)
+    const callTaskImageApi = (requestParams: TaskParams, requestIndex?: number) => callImageApi({
       settings: requestSettings,
-      prompt: replaceImageMentionsForApi(requestPrompt, inputDataUrls.length),
-      params: task.params,
+      prompt: apiPrompt,
+      params: requestParams,
       inputImageDataUrls: inputDataUrls,
       maskDataUrl,
       skipCodexCliSizePrompt: task.sourceMode === 'agent',
@@ -3510,10 +3511,50 @@ async function executeTask(taskId: string) {
         })
       },
       onPartialImage: (partial) => {
-        useStore.getState().setTaskStreamPreview(taskId, partial.image, partial.requestIndex)
+        const previewIndex = requestIndex ?? partial.requestIndex
+        useStore.getState().setTaskStreamPreview(taskId, partial.image, previewIndex)
         void persistTaskStreamPartialImage(taskId, partial.image)
       },
     })
+    const shouldSplitCustomMultiImageRequest = !isAgentTask(task) && taskProvider !== 'fal' && taskProvider !== 'openai' && task.params.n > 1
+    const result = shouldSplitCustomMultiImageRequest
+      ? await (async (): Promise<CallApiResult> => {
+          const results = await Promise.allSettled(
+            Array.from({ length: task.params.n }).map((_, requestIndex) =>
+              callTaskImageApi({ ...task.params, n: 1 }, requestIndex),
+            ),
+          )
+          const successfulResults = results
+            .filter((item): item is PromiseFulfilledResult<CallApiResult> => item.status === 'fulfilled')
+            .map((item) => item.value)
+          const failedRequests = results.flatMap((item, requestIndex) =>
+            item.status === 'rejected' ? [{ requestIndex, error: item.reason instanceof Error ? item.reason.message : String(item.reason) }] : [],
+          )
+          if (successfulResults.length === 0) {
+            const firstError = results.find((item): item is PromiseRejectedResult => item.status === 'rejected')
+            if (firstError) throw firstError.reason
+            throw new Error('所有并发请求均失败')
+          }
+
+          const images = successfulResults.flatMap((item) => item.images).slice(0, task.params.n)
+          const actualParamsList = successfulResults.flatMap((item) =>
+            item.actualParamsList?.length ? item.actualParamsList : item.images.map(() => item.actualParams),
+          ).slice(0, images.length)
+          const revisedPrompts = successfulResults.flatMap((item) =>
+            item.revisedPrompts?.length ? item.revisedPrompts : item.images.map(() => undefined),
+          ).slice(0, images.length)
+          const rawImageUrls = successfulResults.flatMap((item) => item.rawImageUrls ?? []).slice(0, images.length)
+
+          return {
+            images,
+            actualParams: { ...(successfulResults[0]?.actualParams ?? {}), n: images.length },
+            actualParamsList,
+            revisedPrompts,
+            ...(rawImageUrls.length ? { rawImageUrls } : {}),
+            ...(failedRequests.length ? { failedRequests } : {}),
+          }
+        })()
+      : await callTaskImageApi(task.params)
 
     const latestBeforeSuccess = useStore.getState().tasks.find((t) => t.id === taskId)
     if (!latestBeforeSuccess || latestBeforeSuccess.status !== 'running') {
@@ -4460,4 +4501,3 @@ export async function addImageFromUrl(src: string): Promise<void> {
   cacheImage(id, dataUrl)
   useStore.getState().addInputImage({ id, dataUrl })
 }
-
