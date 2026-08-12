@@ -1062,6 +1062,82 @@ describe('callImageApi', () => {
     expect(fetchMock).toHaveBeenCalledTimes(3)
   })
 
+  it('tops up short async custom provider results with single-image tasks', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response(JSON.stringify({ task_id: 'task-1' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        status: 'done',
+        data: [{ b64_json: 'aW1hZ2UtMQ==' }],
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ task_id: 'task-2' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        status: 'done',
+        data: [{ b64_json: 'aW1hZ2UtMg==' }],
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+
+    const result = await callImageApi({
+      settings: {
+        ...DEFAULT_SETTINGS,
+        baseUrl: 'https://api.example.com/v1',
+        customProviders: [{
+          id: 'custom-async-short-result',
+          name: 'Custom Async Short Result',
+          template: 'http-image',
+          submit: {
+            path: 'custom/images',
+            method: 'POST',
+            contentType: 'json',
+            body: { model: '$profile.model', prompt: '$prompt', n: '$params.n' },
+            taskIdPath: 'task_id',
+          },
+          poll: {
+            path: 'custom/tasks/{task_id}',
+            method: 'GET',
+            intervalSeconds: 1,
+            statusPath: 'status',
+            successValues: ['done'],
+            failureValues: ['failed'],
+            result: { b64JsonPaths: ['data.*.b64_json'] },
+          },
+        }],
+        profiles: [{
+          ...DEFAULT_SETTINGS.profiles[0],
+          id: 'profile-custom-async-short-result',
+          provider: 'custom-async-short-result',
+          baseUrl: 'https://api.example.com/v1',
+          apiKey: 'test-key',
+          model: 'model',
+        }],
+        activeProfileId: 'profile-custom-async-short-result',
+      },
+      prompt: 'prompt',
+      params: { ...DEFAULT_PARAMS, n: 2 },
+      inputImageDataUrls: [],
+    })
+
+    expect(fetchMock).toHaveBeenCalledTimes(4)
+    expect(result.images).toEqual([
+      'data:image/png;base64,aW1hZ2UtMQ==',
+      'data:image/png;base64,aW1hZ2UtMg==',
+    ])
+    const firstBody = JSON.parse(String((fetchMock.mock.calls[0][1] as RequestInit).body))
+    const secondBody = JSON.parse(String((fetchMock.mock.calls[2][1] as RequestInit).body))
+    expect(firstBody.n).toBe(2)
+    expect(secondBody.n).toBe(1)
+  })
+
   it('does not apply submit timeout to custom async polling after receiving a task id', async () => {
     vi.useFakeTimers()
     vi.spyOn(globalThis, 'fetch')

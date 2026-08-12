@@ -820,6 +820,7 @@ async function submitCustomRequest(mapping: CustomProviderSubmitMapping, opts: C
 async function callCustomHttpImageApiConcurrent(
   opts: CallApiOptions,
   profile: ApiProfile,
+  customProvider: CustomProviderDefinition,
   submitMapping: CustomProviderSubmitMapping,
   mime: string,
   controller: AbortController,
@@ -838,7 +839,16 @@ async function callCustomHttpImageApiConcurrent(
   const results = await Promise.allSettled(
     Array.from({ length: n }).map(async () => {
       const payload = await submitCustomRequest(submitMapping, singleOpts, profile, controller, proxyConfig, useApiProxy)
-      return extractCustomImages(payload, submitMapping.result ?? {}, mime, controller.signal)
+      const taskIdValue = submitMapping.taskIdPath ? getByPath(payload, submitMapping.taskIdPath) : undefined
+      const taskId = typeof taskIdValue === 'string' ? taskIdValue.trim() : String(taskIdValue ?? '').trim()
+      if (submitMapping.taskIdPath && !taskId) {
+        const err = new Error('无法从响应中提取异步任务 ID，请查看原始响应内容确认接口实际返回的数据结构，并根据 API 文档调整「自定义服务商」配置中的 taskIdPath。')
+        ;(err as any).rawResponsePayload = JSON.stringify(payload, null, 2)
+        throw err
+      }
+      if (!taskId) return extractCustomImages(payload, submitMapping.result ?? {}, mime, controller.signal)
+      if (!customProvider.poll) throw new Error('异步接口返回了 task_id，但服务商配置缺少 poll')
+      return pollCustomTaskResult(profile, customProvider.poll, taskId, mime, controller.signal)
     }),
   )
 
@@ -954,7 +964,7 @@ async function callCustomHttpImageApi(opts: CallApiOptions, profile: ApiProfile,
     }
     const n = params.n > 0 ? params.n : 1
     if (submitMapping.concurrent && !submitMapping.taskIdPath && !customProvider.poll && n > 1) {
-      return callCustomHttpImageApiConcurrent(opts, profile, submitMapping, mime, controller, proxyConfig, useApiProxy, n)
+      return callCustomHttpImageApiConcurrent(opts, profile, customProvider, submitMapping, mime, controller, proxyConfig, useApiProxy, n)
     }
     const submitPayload = await submitCustomRequest(submitMapping, opts, profile, controller, proxyConfig, useApiProxy)
     const taskIdValue = submitMapping.taskIdPath ? getByPath(submitPayload, submitMapping.taskIdPath) : undefined
@@ -968,7 +978,7 @@ async function callCustomHttpImageApi(opts: CallApiOptions, profile: ApiProfile,
       const result = await extractCustomImages(submitPayload, submitMapping.result ?? {}, mime, controller.signal)
       if (n <= 1 || result.images.length >= n) return result
 
-      const topUpResult = await callCustomHttpImageApiConcurrent(opts, profile, submitMapping, mime, controller, proxyConfig, useApiProxy, n - result.images.length, {
+      const topUpResult = await callCustomHttpImageApiConcurrent(opts, profile, customProvider, submitMapping, mime, controller, proxyConfig, useApiProxy, n - result.images.length, {
         requestIndexOffset: result.images.length,
         allowAllFailed: true,
       })
@@ -989,7 +999,23 @@ async function callCustomHttpImageApi(opts: CallApiOptions, profile: ApiProfile,
       clearTimeout(timeoutId)
       timeoutId = null
     }
-    return pollCustomTaskResult(profile, customProvider.poll, taskId, mime, controller.signal)
+    const result = await pollCustomTaskResult(profile, customProvider.poll, taskId, mime, controller.signal)
+    if (n <= 1 || result.images.length >= n) return result
+
+    const topUpResult = await callCustomHttpImageApiConcurrent(opts, profile, customProvider, submitMapping, mime, controller, proxyConfig, useApiProxy, n - result.images.length, {
+      requestIndexOffset: result.images.length,
+      allowAllFailed: true,
+    })
+    const images = [...result.images, ...topUpResult.images]
+    const rawImageUrls = [...(result.rawImageUrls ?? []), ...(topUpResult.rawImageUrls ?? [])]
+    const failedRequests = topUpResult.failedRequests ?? []
+
+    return {
+      images,
+      actualParams: mergeActualParams(result.actualParams, topUpResult.actualParams, { n: images.length }),
+      ...(rawImageUrls.length ? { rawImageUrls } : {}),
+      ...(failedRequests.length ? { failedRequests } : {}),
+    }
   } finally {
     if (timeoutId) clearTimeout(timeoutId)
   }
