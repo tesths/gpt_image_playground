@@ -3,7 +3,7 @@ import { DEFAULT_PARAMS } from '../types'
 import { createDefaultOpenAIProfile, DEFAULT_IMAGES_MODEL, DEFAULT_SETTINGS } from './apiProfiles'
 import { normalizePersistedState } from './persistedState'
 import { callImageApi } from './api'
-import { maybeAppendStreamingHint } from './imageApiShared'
+import { maybeAppendImageToolDroppedHint, maybeAppendStreamingHint } from './imageApiShared'
 
 describe('API error hints', () => {
   it.each([false, true])('uses the transparent background hint when streaming is %s', (streamImages) => {
@@ -12,6 +12,11 @@ describe('API error hints', () => {
     expect(maybeAppendStreamingHint(message, 400, streamImages)).toBe(
       `${message}\n提示：当前使用的 API 不支持为该模型使用原生透明背景，请将「透明背景实现方式」切换为「本地后处理」。`,
     )
+  })
+
+  it('leaves other tool choice errors unchanged', () => {
+    const message = 'The combination of tool_choice and tools is not supported.'
+    expect(maybeAppendImageToolDroppedHint(message)).toBe(message)
   })
 })
 
@@ -172,6 +177,53 @@ describe('callImageApi', () => {
       quality: 'xhigh',
     })
     expect(result.actualParams).toMatchObject({ quality: 'xhigh' })
+  })
+
+  it.each([false, true])('explains the image tool dropped error without retrying when streaming is %s', async (streamImages) => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      error: { message: "Tool choice 'required' must be specified with 'tools' parameter." },
+    }), {
+      status: 400,
+      headers: { 'Content-Type': 'application/json' },
+    }))
+
+    await expect(callImageApi({
+      settings: {
+        ...DEFAULT_SETTINGS,
+        apiKey: 'test-key',
+        apiMode: 'responses',
+        profiles: DEFAULT_SETTINGS.profiles.map((profile) => ({ ...profile, apiMode: 'responses' as const, streamImages })),
+      },
+      prompt: 'prompt',
+      params: { ...DEFAULT_PARAMS },
+      inputImageDataUrls: [],
+    })).rejects.toThrow(/^Tool choice 'required' must be specified with 'tools' parameter\.\n提示：当前使用的 API 可能未正确转发图像生成工具，请尝试更换支持该工具的接口或模型。$/)
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(JSON.parse(String((fetchMock.mock.calls[0][1] as RequestInit).body)).tool_choice).toBe('required')
+  })
+
+  it('keeps the original Responses error when the relay reports an unrelated failure', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      error: { message: 'model not found' },
+    }), {
+      status: 400,
+      headers: { 'Content-Type': 'application/json' },
+    }))
+
+    await expect(callImageApi({
+      settings: {
+        ...DEFAULT_SETTINGS,
+        apiKey: 'test-key',
+        apiMode: 'responses',
+        profiles: DEFAULT_SETTINGS.profiles.map((profile) => ({ ...profile, apiMode: 'responses' as const })),
+      },
+      prompt: 'prompt',
+      params: { ...DEFAULT_PARAMS },
+      inputImageDataUrls: [],
+    })).rejects.toThrow('model not found')
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
   it('does not add the prompt rewrite guard on Codex CLI Images API when prompt rewrite is allowed', async () => {
@@ -692,50 +744,6 @@ describe('callImageApi', () => {
     ])
   })
 
-  it('splits Images API requests into concurrent single-image requests when n is greater than 1', async () => {
-    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
-      const callIndex = fetchMock.mock.calls.length
-      return new Response(JSON.stringify({
-        data: [{ b64_json: `aW1hZ2Ut${callIndex}` }],
-      }), {
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
-      })
-    })
-
-    const result = await callImageApi({
-      settings: {
-        ...DEFAULT_SETTINGS,
-        apiKey: 'test-key',
-        apiMode: 'images',
-        codexCli: false,
-        streamImages: false,
-        profiles: DEFAULT_SETTINGS.profiles.map((profile) => ({
-          ...profile,
-          apiKey: 'test-key',
-          apiMode: 'images',
-          codexCli: false,
-          streamImages: false,
-        })),
-      },
-      prompt: 'prompt',
-      params: { ...DEFAULT_PARAMS, n: 3 },
-      inputImageDataUrls: [],
-    })
-
-    expect(fetchMock).toHaveBeenCalledTimes(3)
-    for (const [, init] of fetchMock.mock.calls) {
-      const body = JSON.parse(String((init as RequestInit).body))
-      expect(body.n).toBeUndefined()
-    }
-    expect(result.images).toEqual([
-      'data:image/png;base64,aW1hZ2Ut1',
-      'data:image/png;base64,aW1hZ2Ut2',
-      'data:image/png;base64,aW1hZ2Ut3',
-    ])
-    expect(result.actualParams).toMatchObject({ n: 3 })
-  })
-
   it('keeps successful Images API concurrent results when one request fails', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
       const callIndex = fetchMock.mock.calls.length
@@ -931,9 +939,6 @@ describe('callImageApi', () => {
       '/api-proxy/images/generations',
       expect.objectContaining({ method: 'POST' }),
     )
-    expect((fetchMock.mock.calls[0][1] as RequestInit).headers).toMatchObject({
-      'X-Api-Proxy-Target': 'http://api.example.com/v1',
-    })
   })
 
   it('uses the same-origin API proxy path when API proxy is enabled and base URL is empty', async () => {
@@ -1319,109 +1324,6 @@ describe('callImageApi', () => {
     })).rejects.toThrow('请将「透明背景实现方式」切换为「本地后处理」')
   })
 
-  it('splits sync custom providers into concurrent single-image requests when enabled', async () => {
-    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify({
-      data: [{ b64_json: 'aW1hZ2U=' }],
-    }), {
-      status: 200,
-      headers: { 'Content-Type': 'application/json' },
-    }))
-
-    const result = await callImageApi({
-      settings: {
-        ...DEFAULT_SETTINGS,
-        customProviders: [{
-          id: 'custom-concurrent',
-          name: 'Custom Concurrent',
-          template: 'http-image',
-          submit: {
-            path: 'custom/images',
-            method: 'POST',
-            contentType: 'json',
-            concurrent: true,
-            body: { model: '$profile.model', prompt: '$prompt', n: '$params.n' },
-            result: { b64JsonPaths: ['data.*.b64_json'] },
-          },
-        }],
-        profiles: [{
-          ...DEFAULT_SETTINGS.profiles[0],
-          id: 'profile-custom-concurrent',
-          provider: 'custom-concurrent',
-          baseUrl: 'https://api.example.com/v1',
-          apiKey: 'test-key',
-          model: 'model',
-        }],
-        activeProfileId: 'profile-custom-concurrent',
-      },
-      prompt: 'prompt',
-      params: { ...DEFAULT_PARAMS, n: 4 },
-      inputImageDataUrls: [],
-    })
-
-    expect(fetchMock).toHaveBeenCalledTimes(4)
-    expect(result.images).toEqual([
-      'data:image/png;base64,aW1hZ2U=',
-      'data:image/png;base64,aW1hZ2U=',
-      'data:image/png;base64,aW1hZ2U=',
-      'data:image/png;base64,aW1hZ2U=',
-    ])
-    expect(result.actualParams).toMatchObject({ n: 4 })
-    for (const [, init] of fetchMock.mock.calls) {
-      const body = JSON.parse(String((init as RequestInit).body))
-      expect(body.n).toBe(1)
-    }
-  })
-
-  it('tops up short sync custom provider results with single-image requests', async () => {
-    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify({
-      data: [{ b64_json: 'aW1hZ2U=' }],
-    }), {
-      status: 200,
-      headers: { 'Content-Type': 'application/json' },
-    }))
-
-    const result = await callImageApi({
-      settings: {
-        ...DEFAULT_SETTINGS,
-        customProviders: [{
-          id: 'custom-short-result',
-          name: 'Custom Short Result',
-          template: 'http-image',
-          submit: {
-            path: 'custom/images',
-            method: 'POST',
-            contentType: 'json',
-            body: { model: '$profile.model', prompt: '$prompt', n: '$params.n' },
-            result: { b64JsonPaths: ['data.*.b64_json'] },
-          },
-        }],
-        profiles: [{
-          ...DEFAULT_SETTINGS.profiles[0],
-          id: 'profile-custom-short-result',
-          provider: 'custom-short-result',
-          baseUrl: 'https://api.example.com/v1',
-          apiKey: 'test-key',
-          model: 'model',
-        }],
-        activeProfileId: 'profile-custom-short-result',
-      },
-      prompt: 'prompt',
-      params: { ...DEFAULT_PARAMS, n: 2 },
-      inputImageDataUrls: [],
-    })
-
-    expect(fetchMock).toHaveBeenCalledTimes(2)
-    expect(result.images).toEqual([
-      'data:image/png;base64,aW1hZ2U=',
-      'data:image/png;base64,aW1hZ2U=',
-    ])
-    expect(result.actualParams).toMatchObject({ n: 2 })
-    const firstBody = JSON.parse(String((fetchMock.mock.calls[0][1] as RequestInit).body))
-    const secondBody = JSON.parse(String((fetchMock.mock.calls[1][1] as RequestInit).body))
-    expect(firstBody.n).toBe(2)
-    expect(secondBody.n).toBe(1)
-  })
-
   it('rejects API proxy for async custom providers', async () => {
     vi.stubEnv('VITE_API_PROXY_AVAILABLE', 'true')
     const fetchMock = vi.spyOn(globalThis, 'fetch')
@@ -1626,82 +1528,6 @@ describe('callImageApi', () => {
       images: ['data:image/png;base64,aW1hZ2U='],
     })
     expect(fetchMock).toHaveBeenCalledTimes(3)
-  })
-
-  it('tops up short async custom provider results with single-image tasks', async () => {
-    const fetchMock = vi.spyOn(globalThis, 'fetch')
-      .mockResolvedValueOnce(new Response(JSON.stringify({ task_id: 'task-1' }), {
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
-      }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({
-        status: 'done',
-        data: [{ b64_json: 'aW1hZ2UtMQ==' }],
-      }), {
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
-      }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ task_id: 'task-2' }), {
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
-      }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({
-        status: 'done',
-        data: [{ b64_json: 'aW1hZ2UtMg==' }],
-      }), {
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
-      }))
-
-    const result = await callImageApi({
-      settings: {
-        ...DEFAULT_SETTINGS,
-        baseUrl: 'https://api.example.com/v1',
-        customProviders: [{
-          id: 'custom-async-short-result',
-          name: 'Custom Async Short Result',
-          template: 'http-image',
-          submit: {
-            path: 'custom/images',
-            method: 'POST',
-            contentType: 'json',
-            body: { model: '$profile.model', prompt: '$prompt', n: '$params.n' },
-            taskIdPath: 'task_id',
-          },
-          poll: {
-            path: 'custom/tasks/{task_id}',
-            method: 'GET',
-            intervalSeconds: 1,
-            statusPath: 'status',
-            successValues: ['done'],
-            failureValues: ['failed'],
-            result: { b64JsonPaths: ['data.*.b64_json'] },
-          },
-        }],
-        profiles: [{
-          ...DEFAULT_SETTINGS.profiles[0],
-          id: 'profile-custom-async-short-result',
-          provider: 'custom-async-short-result',
-          baseUrl: 'https://api.example.com/v1',
-          apiKey: 'test-key',
-          model: 'model',
-        }],
-        activeProfileId: 'profile-custom-async-short-result',
-      },
-      prompt: 'prompt',
-      params: { ...DEFAULT_PARAMS, n: 2 },
-      inputImageDataUrls: [],
-    })
-
-    expect(fetchMock).toHaveBeenCalledTimes(4)
-    expect(result.images).toEqual([
-      'data:image/png;base64,aW1hZ2UtMQ==',
-      'data:image/png;base64,aW1hZ2UtMg==',
-    ])
-    const firstBody = JSON.parse(String((fetchMock.mock.calls[0][1] as RequestInit).body))
-    const secondBody = JSON.parse(String((fetchMock.mock.calls[2][1] as RequestInit).body))
-    expect(firstBody.n).toBe(2)
-    expect(secondBody.n).toBe(1)
   })
 
   it('uses the built-in sub2api async endpoints and result mapping', async () => {

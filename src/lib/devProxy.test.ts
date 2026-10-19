@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { buildApiUrl, createApiProxyTargetHeaders, normalizeBaseUrl } from './devProxy'
+import { buildApiUrl, normalizeBaseUrl } from './devProxy'
 
 describe('normalizeBaseUrl', () => {
   it('preserves a trailing slash used for direct endpoint joining', () => {
@@ -48,26 +48,6 @@ describe('buildApiUrl', () => {
     expect(buildApiUrl('http://api.example.com/v1', 'responses', null, false)).toBe(
       'http://api.example.com/v1/responses',
     )
-  })
-
-  it('adds the production proxy target header when using a Vercel-style proxy', () => {
-    expect(createApiProxyTargetHeaders('http://api.example.com/v1', null, true)).toEqual({
-      'X-Api-Proxy-Target': 'http://api.example.com/v1',
-    })
-  })
-
-  it('omits the proxy target header for the local Vite proxy', () => {
-    expect(createApiProxyTargetHeaders(
-      'http://api.example.com/v1',
-      {
-        enabled: true,
-        prefix: '/api-proxy',
-        target: 'http://api.example.com/v1',
-        changeOrigin: true,
-        secure: false,
-      },
-      true,
-    )).toEqual({})
   })
 
   it('joins the endpoint directly when the API URL ends with a slash', () => {

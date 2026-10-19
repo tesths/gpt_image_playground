@@ -1,10 +1,11 @@
 import { DEFAULT_STREAM_PARTIAL_IMAGES, type ApiProfile, type CustomProviderDefinition, type CustomProviderPollMapping, type CustomProviderResultMapping, type CustomProviderSubmitMapping, type ImageApiResponse, type ImageResponseItem, type ResponsesApiResponse, type ResponsesOutputItem, type TaskParams } from '../types'
 import { dataUrlToBlob, imageDataUrlToPngBlob, maskDataUrlToPngBlob } from './canvasImage'
-import { buildApiUrl, createApiProxyTargetHeaders, readClientDevProxyConfig, shouldUseApiProxy, type DevProxyConfig } from './devProxy'
+import { buildApiUrl, readClientDevProxyConfig, shouldUseApiProxy } from './devProxy'
 import {
   assertImageInputPayloadSize,
   assertMaskEditFileSize,
   appendStreamingFormatHint,
+  createRequestTimeoutError,
   maybeAppendStreamingHint,
   type CallApiOptions,
   type CallApiResult,
@@ -17,12 +18,14 @@ import {
   isHttpUrl,
   mergeActualParams,
   maybeAppendTransparentBackgroundHint,
+  maybeAppendImageToolDroppedHint,
   MIME_MAP,
   normalizeBase64Image,
   pickActualParams,
   PROMPT_REWRITE_GUARD_PREFIX,
 } from './imageApiShared'
 import { getImageGenerationModel } from './imageModels'
+import { apiFetch, FetchConnectError } from './platform'
 import { isEventStreamResponse, readJsonServerSentEvents } from './serverSentEvents'
 import { prependCodexCliSizePrompt } from './size'
 
@@ -86,10 +89,9 @@ function normalizeImageApiPayload(value: unknown): ImageApiResponse {
   return { data: [] }
 }
 
-function createRequestHeaders(profile: ApiProfile, proxyConfig: DevProxyConfig | null = null, useApiProxy = false): Record<string, string> {
+function createRequestHeaders(profile: ApiProfile): Record<string, string> {
   return {
     Authorization: `Bearer ${profile.apiKey}`,
-    ...createApiProxyTargetHeaders(profile.baseUrl, proxyConfig, useApiProxy),
   }
 }
 
@@ -441,7 +443,7 @@ export async function callOpenAICompatibleImageApi(opts: CallApiOptions, profile
       ? customProvider.editSubmit
       : customProvider.submit
     const isAsync = Boolean(submitMapping.taskIdPath)
-    if (profile.codexCli && n > 1 && !isAsync) return callCustomHttpImageApiConcurrentRequests(opts, profile, customProvider, n)
+    if (profile.codexCli && n > 1 && !isAsync) return callCustomHttpImageApiConcurrent(opts, profile, customProvider, n)
     return callCustomHttpImageApi(opts, profile, customProvider)
   }
 
@@ -452,7 +454,7 @@ export async function callOpenAICompatibleImageApi(opts: CallApiOptions, profile
 
 async function callImagesApi(opts: CallApiOptions, profile: ApiProfile): Promise<CallApiResult> {
   const n = opts.params.n > 0 ? opts.params.n : 1
-  if (n > 1) {
+  if ((profile.codexCli || (profile.streamImages && n > 1)) && n > 1) {
     return callImagesApiConcurrent(opts, profile, n)
   }
 
@@ -492,11 +494,11 @@ async function callImagesApiSingle(opts: CallApiOptions, profile: ApiProfile): P
   const mime = MIME_MAP[params.output_format] || 'image/png'
   const proxyConfig = readClientDevProxyConfig()
   const useApiProxy = shouldUseApiProxy(profile.apiProxy, proxyConfig)
-  const requestHeaders = createRequestHeaders(profile, proxyConfig, useApiProxy)
+  const requestHeaders = createRequestHeaders(profile)
   const paths = createOpenAICompatiblePaths()
 
   const controller = new AbortController()
-  const timeoutId = setTimeout(() => controller.abort(), profile.timeout * 1000)
+  const timeoutId = setTimeout(() => controller.abort(createRequestTimeoutError(profile.timeout)), profile.timeout * 1000)
 
   try {
     let response: Response
@@ -560,7 +562,7 @@ async function callImagesApiSingle(opts: CallApiOptions, profile: ApiProfile): P
         formData.append('mask', maskBlob, 'mask.png')
       }
 
-      response = await fetch(buildApiUrl(profile.baseUrl, paths.editPath, proxyConfig, useApiProxy), {
+      response = await apiFetch(buildApiUrl(profile.baseUrl, paths.editPath, proxyConfig, useApiProxy), {
         method: 'POST',
         headers: requestHeaders,
         cache: 'no-store',
@@ -601,7 +603,7 @@ async function callImagesApiSingle(opts: CallApiOptions, profile: ApiProfile): P
         body.partial_images = getStreamPartialImages(profile)
       }
 
-      response = await fetch(buildApiUrl(profile.baseUrl, paths.generationPath, proxyConfig, useApiProxy), {
+      response = await apiFetch(buildApiUrl(profile.baseUrl, paths.generationPath, proxyConfig, useApiProxy), {
         method: 'POST',
         headers: {
           ...requestHeaders,
@@ -619,10 +621,10 @@ async function callImagesApiSingle(opts: CallApiOptions, profile: ApiProfile): P
     }
 
     if (profile.streamImages && isEventStreamResponse(response)) {
-      return parseImagesApiStreamResponse(response, mime, opts.onPartialImage, controller.signal)
+      return await parseImagesApiStreamResponse(response, mime, opts.onPartialImage, controller.signal)
     }
 
-    return parseImagesApiResponse(await response.json() as ImageApiResponse, mime, controller.signal)
+    return await parseImagesApiResponse(await response.json() as ImageApiResponse, mime, controller.signal)
   } finally {
     clearTimeout(timeoutId)
   }
@@ -652,6 +654,7 @@ function getTaskState(payload: unknown, poll: CustomProviderPollMapping): 'succe
 
 function isRecoverablePollingError(err: unknown): boolean {
   if (typeof DOMException !== 'undefined' && err instanceof DOMException && err.name === 'AbortError') return true
+  if (err instanceof FetchConnectError) return true
   const message = err instanceof Error ? err.message : String(err)
   return /abort|network|failed to fetch|fetch failed|load failed|timeout|连接|断开|中断/i.test(message)
 }
@@ -795,7 +798,7 @@ async function extractCustomImages(payload: unknown, result: CustomProviderResul
 }
 
 async function submitCustomRequest(mapping: CustomProviderSubmitMapping, opts: CallApiOptions, profile: ApiProfile, controller: AbortController, proxyConfig: ReturnType<typeof readClientDevProxyConfig>, useApiProxy: boolean): Promise<unknown> {
-  const requestHeaders = createRequestHeaders(profile, proxyConfig, useApiProxy)
+  const requestHeaders = createRequestHeaders(profile)
   const context = createCustomProviderContext(opts, profile)
   const method = mapping.method ?? 'POST'
   const contentType = mapping.contentType ?? 'json'
@@ -824,7 +827,7 @@ async function submitCustomRequest(mapping: CustomProviderSubmitMapping, opts: C
     }
   }
 
-  const response = await fetch(buildApiUrl(profile.baseUrl, path, proxyConfig, useApiProxy), {
+  const response = await apiFetch(buildApiUrl(profile.baseUrl, path, proxyConfig, useApiProxy), {
     method,
     headers,
     cache: 'no-store',
@@ -839,66 +842,6 @@ async function submitCustomRequest(mapping: CustomProviderSubmitMapping, opts: C
   return response.json()
 }
 
-async function callCustomHttpImageApiConcurrent(
-  opts: CallApiOptions,
-  profile: ApiProfile,
-  customProvider: CustomProviderDefinition,
-  submitMapping: CustomProviderSubmitMapping,
-  mime: string,
-  controller: AbortController,
-  proxyConfig: ReturnType<typeof readClientDevProxyConfig>,
-  useApiProxy: boolean,
-  n: number,
-  options: { requestIndexOffset?: number; allowAllFailed?: boolean } = {},
-): Promise<CallApiResult> {
-  const singleOpts = {
-    ...opts,
-    params: {
-      ...opts.params,
-      n: 1,
-    },
-  }
-  const results = await Promise.allSettled(
-    Array.from({ length: n }).map(async () => {
-      const payload = await submitCustomRequest(submitMapping, singleOpts, profile, controller, proxyConfig, useApiProxy)
-      const taskIdValue = submitMapping.taskIdPath ? getByPath(payload, submitMapping.taskIdPath) : undefined
-      const taskId = typeof taskIdValue === 'string' ? taskIdValue.trim() : String(taskIdValue ?? '').trim()
-      if (submitMapping.taskIdPath && !taskId) {
-        const err = new Error('无法从响应中提取异步任务 ID，请查看原始响应内容确认接口实际返回的数据结构，并根据 API 文档调整「自定义服务商」配置中的 taskIdPath。')
-        ;(err as any).rawResponsePayload = JSON.stringify(payload, null, 2)
-        throw err
-      }
-      if (!taskId) return extractCustomImages(payload, submitMapping.result ?? {}, mime, controller.signal)
-      if (!customProvider.poll) throw new Error('异步接口返回了 task_id，但服务商配置缺少 poll')
-      return pollCustomTaskResult(profile, customProvider.poll, taskId, mime, controller.signal)
-    }),
-  )
-
-  const successfulResults = results
-    .filter((r): r is PromiseFulfilledResult<CallApiResult> => r.status === 'fulfilled')
-    .map((r) => r.value)
-  const failedRequests = results.flatMap((r, requestIndex) =>
-    r.status === 'rejected' ? [{ requestIndex: requestIndex + (options.requestIndexOffset ?? 0), error: getErrorMessage(r.reason) }] : [],
-  )
-
-  if (successfulResults.length === 0) {
-    if (options.allowAllFailed) return { images: [], ...(failedRequests.length ? { failedRequests } : {}) }
-    const firstError = results.find((r): r is PromiseRejectedResult => r.status === 'rejected')
-    if (firstError) throw firstError.reason
-    throw new Error('所有并发请求均失败')
-  }
-
-  const images = successfulResults.flatMap((r) => r.images)
-  const rawImageUrls = successfulResults.flatMap((r) => r.rawImageUrls ?? [])
-
-  return {
-    images,
-    actualParams: mergeActualParams(successfulResults[0]?.actualParams, { n: images.length }),
-    ...(rawImageUrls.length ? { rawImageUrls } : {}),
-    ...(failedRequests.length ? { failedRequests } : {}),
-  }
-}
-
 async function pollCustomTaskResult(
   profile: ApiProfile,
   poll: CustomProviderPollMapping,
@@ -907,7 +850,7 @@ async function pollCustomTaskResult(
   signal?: AbortSignal,
 ): Promise<CallApiResult> {
   const proxyConfig = readClientDevProxyConfig()
-  const requestHeaders = createRequestHeaders(profile, proxyConfig, false)
+  const requestHeaders = createRequestHeaders(profile)
   let isFirstPoll = true
 
   while (true) {
@@ -922,7 +865,7 @@ async function pollCustomTaskResult(
     const taskPath = appendQuery(buildTaskPath(poll.path, taskId), poll.query)
     let taskPayload: unknown
     try {
-      const taskResponse = await fetch(buildApiUrl(profile.baseUrl, taskPath, proxyConfig, false), {
+      const taskResponse = await apiFetch(buildApiUrl(profile.baseUrl, taskPath, proxyConfig, false), {
         method: poll.method ?? 'GET',
         headers: requestHeaders,
         cache: 'no-store',
@@ -930,7 +873,11 @@ async function pollCustomTaskResult(
       })
 
       if (!taskResponse.ok) {
-        if (isRetryablePollingStatus(taskResponse.status)) continue
+        if (isRetryablePollingStatus(taskResponse.status)) {
+          // 不读的响应体要主动取消，否则客户端中连接会保留到服务端发完为止
+          void taskResponse.body?.cancel().catch(() => undefined)
+          continue
+        }
         throw new Error(await getApiErrorMessage(taskResponse))
       }
 
@@ -973,7 +920,7 @@ async function callCustomHttpImageApi(opts: CallApiOptions, profile: ApiProfile,
   const isEdit = inputImageDataUrls.length > 0
   const mime = MIME_MAP[params.output_format] || 'image/png'
   const controller = new AbortController()
-  let timeoutId: ReturnType<typeof setTimeout> | null = setTimeout(() => controller.abort(), profile.timeout * 1000)
+  let timeoutId: ReturnType<typeof setTimeout> | null = setTimeout(() => controller.abort(createRequestTimeoutError(profile.timeout)), profile.timeout * 1000)
 
   try {
     const proxyConfig = readClientDevProxyConfig()
@@ -985,10 +932,6 @@ async function callCustomHttpImageApi(opts: CallApiOptions, profile: ApiProfile,
     if (useApiProxy && (submitMapping.taskIdPath || customProvider.poll)) {
       throw new Error('API 代理暂不支持使用异步任务的自定义服务商。请关闭 API 代理，或改用同步返回图片的自定义服务商配置。')
     }
-    const n = params.n > 0 ? params.n : 1
-    if (submitMapping.concurrent && !submitMapping.taskIdPath && !customProvider.poll && n > 1) {
-      return callCustomHttpImageApiConcurrent(opts, profile, customProvider, submitMapping, mime, controller, proxyConfig, useApiProxy, n)
-    }
     const submitPayload = await submitCustomRequest(submitMapping, opts, profile, controller, proxyConfig, useApiProxy)
     const taskIdValue = submitMapping.taskIdPath ? getByPath(submitPayload, submitMapping.taskIdPath) : undefined
     const taskId = typeof taskIdValue === 'string' ? taskIdValue.trim() : String(taskIdValue ?? '').trim()
@@ -997,48 +940,14 @@ async function callCustomHttpImageApi(opts: CallApiOptions, profile: ApiProfile,
       ;(err as any).rawResponsePayload = JSON.stringify(submitPayload, null, 2)
       throw err
     }
-    if (!taskId) {
-      const result = await extractCustomImages(submitPayload, submitMapping.result ?? {}, mime, controller.signal)
-      if (n <= 1 || result.images.length >= n) return result
-
-      const topUpResult = await callCustomHttpImageApiConcurrent(opts, profile, customProvider, submitMapping, mime, controller, proxyConfig, useApiProxy, n - result.images.length, {
-        requestIndexOffset: result.images.length,
-        allowAllFailed: true,
-      })
-      const images = [...result.images, ...topUpResult.images]
-      const rawImageUrls = [...(result.rawImageUrls ?? []), ...(topUpResult.rawImageUrls ?? [])]
-      const failedRequests = topUpResult.failedRequests ?? []
-
-      return {
-        images,
-        actualParams: mergeActualParams(result.actualParams, topUpResult.actualParams, { n: images.length }),
-        ...(rawImageUrls.length ? { rawImageUrls } : {}),
-        ...(failedRequests.length ? { failedRequests } : {}),
-      }
-    }
+    if (!taskId) return await extractCustomImages(submitPayload, submitMapping.result ?? {}, mime, controller.signal)
     if (!customProvider.poll) throw new Error('异步接口返回了 task_id，但服务商配置缺少 poll')
     opts.onCustomTaskEnqueued?.({ taskId })
     if (timeoutId) {
       clearTimeout(timeoutId)
       timeoutId = null
     }
-    const result = await pollCustomTaskResult(profile, customProvider.poll, taskId, mime, controller.signal)
-    if (n <= 1 || result.images.length >= n) return result
-
-    const topUpResult = await callCustomHttpImageApiConcurrent(opts, profile, customProvider, submitMapping, mime, controller, proxyConfig, useApiProxy, n - result.images.length, {
-      requestIndexOffset: result.images.length,
-      allowAllFailed: true,
-    })
-    const images = [...result.images, ...topUpResult.images]
-    const rawImageUrls = [...(result.rawImageUrls ?? []), ...(topUpResult.rawImageUrls ?? [])]
-    const failedRequests = topUpResult.failedRequests ?? []
-
-    return {
-      images,
-      actualParams: mergeActualParams(result.actualParams, topUpResult.actualParams, { n: images.length }),
-      ...(rawImageUrls.length ? { rawImageUrls } : {}),
-      ...(failedRequests.length ? { failedRequests } : {}),
-    }
+    return pollCustomTaskResult(profile, customProvider.poll, taskId, mime, controller.signal)
   } finally {
     if (timeoutId) clearTimeout(timeoutId)
   }
@@ -1075,7 +984,7 @@ function mergeConcurrentApiResults(results: PromiseSettledResult<CallApiResult>[
   }
 }
 
-async function callCustomHttpImageApiConcurrentRequests(
+async function callCustomHttpImageApiConcurrent(
   opts: CallApiOptions,
   profile: ApiProfile,
   customProvider: CustomProviderDefinition,
@@ -1112,9 +1021,9 @@ async function callResponsesImageApiSingle(opts: CallApiOptions, profile: ApiPro
   const mime = MIME_MAP[params.output_format] || 'image/png'
   const proxyConfig = readClientDevProxyConfig()
   const useApiProxy = shouldUseApiProxy(profile.apiProxy, proxyConfig)
-  const requestHeaders = createRequestHeaders(profile, proxyConfig, useApiProxy)
+  const requestHeaders = createRequestHeaders(profile)
   const controller = new AbortController()
-  const timeoutId = setTimeout(() => controller.abort(), profile.timeout * 1000)
+  const timeoutId = setTimeout(() => controller.abort(createRequestTimeoutError(profile.timeout)), profile.timeout * 1000)
 
   try {
     if (opts.maskDataUrl) {
@@ -1137,7 +1046,7 @@ async function callResponsesImageApiSingle(opts: CallApiOptions, profile: ApiPro
       body.stream = true
     }
 
-    const response = await fetch(buildApiUrl(profile.baseUrl, 'responses', proxyConfig, useApiProxy), {
+    const response = await apiFetch(buildApiUrl(profile.baseUrl, 'responses', proxyConfig, useApiProxy), {
       method: 'POST',
       headers: {
         ...requestHeaders,
@@ -1150,11 +1059,11 @@ async function callResponsesImageApiSingle(opts: CallApiOptions, profile: ApiPro
 
     if (!response.ok) {
       const errorMessage = await getApiErrorMessage(response)
-      throw new Error(maybeAppendStreamingHint(errorMessage, response.status, profile.streamImages))
+      throw new Error(maybeAppendStreamingHint(maybeAppendImageToolDroppedHint(errorMessage), response.status, profile.streamImages))
     }
 
     if (profile.streamImages && isEventStreamResponse(response)) {
-      return parseResponsesApiStreamResponse(response, mime, opts.onPartialImage)
+      return await parseResponsesApiStreamResponse(response, mime, opts.onPartialImage)
     }
 
     const payload = await response.json() as ResponsesApiResponse

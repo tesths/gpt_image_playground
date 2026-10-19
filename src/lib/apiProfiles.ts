@@ -3,6 +3,8 @@ import type {
   ApiProfile,
   ApiProvider,
   AppSettings,
+  PresetAgentConfig,
+  PresetConfig,
   AgentApiConfigMode,
   CustomProviderContentType,
   CustomProviderDefinition,
@@ -12,6 +14,8 @@ import type {
   CustomProviderResultMapping,
   CustomProviderSubmitMapping,
   CustomProviderTemplate,
+  ReferenceImageEditAction,
+  RetryMode,
 } from '../types'
 import { DEFAULT_AGENT_MAX_TOOL_ROUNDS, DEFAULT_STREAM_PARTIAL_IMAGES, DEFAULT_ZIP_DOWNLOAD_ROUTES, ZIP_DOWNLOAD_ROUTE_VALUES } from '../types'
 import { customProviderSupportsNativeTransparentBackground } from './customProviderCapabilities'
@@ -20,6 +24,8 @@ import { normalizeReasoningEffort, normalizeStreamPartialImages, parseDefaultApi
 import { readRuntimeEnv } from './runtimeEnv'
 import { isImportableConfigUrl } from './importableConfigUrl'
 import { DEFAULT_IMAGES_MODEL } from './imageModels'
+import { DEFAULT_BATCH_PROMPT_CONCURRENCY, normalizeBatchPromptConcurrency } from './batchPrompts'
+import { normalizeFontMode } from './fonts'
 
 const OPENAI_DEFAULT_BASE_URL = 'https://api.openai.com/v1'
 const RAW_DEFAULT_API_URL = readRuntimeEnv(import.meta.env.VITE_DEFAULT_API_URL)
@@ -30,7 +36,7 @@ const DEFAULT_API_URL_PATCH = isImportableConfigUrl(RAW_DEFAULT_API_URL)
   : parseDefaultApiUrl(RAW_DEFAULT_API_URL || (DOCKER_DEPLOYMENT && DEFAULT_OPENAI_API_PROXY ? '' : OPENAI_DEFAULT_BASE_URL))
 const DEFAULT_BASE_URL = DEFAULT_API_URL_PATCH?.baseUrl ?? ''
 export { DEFAULT_IMAGES_MODEL } from './imageModels'
-export const DEFAULT_RESPONSES_MODEL = 'gpt-5.6-sol'
+export const DEFAULT_RESPONSES_MODEL = 'gpt-6.1-sol'
 export const DEFAULT_FAL_BASE_URL = 'https://fal.run'
 export const DEFAULT_FAL_MODEL = 'openai/gpt-image-2'
 export const DEFAULT_OPENAI_PROFILE_ID = 'default-openai'
@@ -122,6 +128,15 @@ export function getDefaultApiProfileId(settings: Partial<AppSettings> | unknown)
   const marked = profiles.find((profile) => profile.isDefault === true && typeof profile.id === 'string')
   if (marked && typeof marked.id === 'string') return marked.id
   return null
+}
+
+function normalizeReferenceImageEditAction(value: unknown): ReferenceImageEditAction {
+  return value === 'sketch' || value === 'mask' ? value : 'ask'
+}
+
+function normalizeRetryMode(value: unknown, alwaysShowRetryButton: boolean): RetryMode {
+  if (value === 'overwriteAll') return alwaysShowRetryButton ? value : 'overwriteFailed'
+  return value === 'overwriteFailed' ? value : 'new'
 }
 
 function normalizeZipDownloadRoutes(value: unknown) {
@@ -225,7 +240,6 @@ function normalizeSubmitMapping(value: unknown, fallback: CustomProviderSubmitMa
     path: normalizeProviderPath(record.path, fallback.path),
     method: normalizeRequestMethod(record.method, fallback.method ?? 'POST'),
     contentType,
-    concurrent: record.concurrent === true || fallback.concurrent === true ? true : undefined,
     query: normalizeStringRecord(record.query) ?? fallback.query,
     body: normalizeBodyTemplate(record.body, fallback.body ?? (contentType === 'multipart' ? DEFAULT_EDIT_BODY : DEFAULT_GENERATE_BODY)),
     files: contentType === 'multipart' ? normalizeFileMappings(record.files, fallback.files) : undefined,
@@ -497,7 +511,7 @@ function normalizeProviderDraft(
     ? createDefaultFalProfile()
     : createDefaultOpenAIProfile({ transparentBackgroundMethod })
   const baseUrl = typeof input.baseUrl === 'string' ? input.baseUrl : undefined
-  const model = typeof input.model === 'string' && input.model.trim() ? input.model : undefined
+  const model = (typeof input.model === 'string' && normalizeModelList(input.model)) || undefined
   const imageGenerationModel = typeof input.imageGenerationModel === 'string' ? input.imageGenerationModel.trim() : ''
   const apiMode = input.apiMode === 'responses' ? 'responses' : input.apiMode === 'images' ? 'images' : undefined
   const knownProvider = BUILT_IN_PROVIDER_IDS.has(provider) || customProviderIds.has(provider)
@@ -566,7 +580,8 @@ export function normalizeApiProfile(
     provider,
     baseUrl: provider === 'fal' ? rawBaseUrl.trim().replace(/\/+$/, '') : rawBaseUrl,
     apiKey: typeof record.apiKey === 'string' ? record.apiKey : defaults.apiKey,
-    model: typeof record.model === 'string' && record.model.trim() ? record.model : defaults.model,
+    model: (typeof record.model === 'string' && normalizeModelList(record.model)) || defaults.model,
+    selectedModel: typeof record.selectedModel === 'string' && record.selectedModel.trim() ? record.selectedModel.trim() : undefined,
     imageGenerationModel: typeof record.imageGenerationModel === 'string'
       ? record.imageGenerationModel.trim()
       : '',
@@ -721,10 +736,24 @@ export function normalizeSettings(input: Partial<AppSettings> | unknown): AppSet
     persistInputOnRestart: typeof record.persistInputOnRestart === 'boolean' ? record.persistInputOnRestart : true,
     reuseTaskApiProfileTemporarily: typeof record.reuseTaskApiProfileTemporarily === 'boolean' ? record.reuseTaskApiProfileTemporarily : false,
     alwaysShowRetryButton: typeof record.alwaysShowRetryButton === 'boolean' ? record.alwaysShowRetryButton : false,
+    retryMode: normalizeRetryMode(record.retryMode, record.alwaysShowRetryButton === true),
     allowPromptRewrite: typeof record.allowPromptRewrite === 'boolean' ? record.allowPromptRewrite : false,
     taskCompletionNotification: typeof record.taskCompletionNotification === 'boolean' ? record.taskCompletionNotification : false,
+    autoCheckUpdate: typeof record.autoCheckUpdate === 'boolean' ? record.autoCheckUpdate : true,
+    writeLogFile: typeof record.writeLogFile === 'boolean' ? record.writeLogFile : true,
     enterSubmit: typeof record.enterSubmit === 'boolean' ? record.enterSubmit : false,
+    uiFont: normalizeFontMode(record.uiFont),
+    uiFontName: typeof record.uiFontName === 'string' ? record.uiFontName.trim() : '',
+    monoFont: normalizeFontMode(record.monoFont),
+    monoFontName: typeof record.monoFontName === 'string' ? record.monoFontName.trim() : '',
+    showBatchPrompt: typeof record.showBatchPrompt === 'boolean' ? record.showBatchPrompt : false,
+    batchPromptEnabled: typeof record.batchPromptEnabled === 'boolean' ? record.batchPromptEnabled : false,
+    batchPromptMode: record.batchPromptMode === 'concurrent' ? 'concurrent' : 'queue',
+    batchPromptConcurrencyLimited: typeof record.batchPromptConcurrencyLimited === 'boolean' ? record.batchPromptConcurrencyLimited : true,
+    batchPromptConcurrency: normalizeBatchPromptConcurrency(record.batchPromptConcurrency),
+    referenceImageEditAction: normalizeReferenceImageEditAction(record.referenceImageEditAction),
     zipDownloadRoutes: normalizeZipDownloadRoutes(record.zipDownloadRoutes),
+    saveLocationMode: record.saveLocationMode === 'default' ? 'default' : 'ask',
     agentScrollToBottomAfterSubmit: typeof record.agentScrollToBottomAfterSubmit === 'boolean' ? record.agentScrollToBottomAfterSubmit : true,
     agentMaxToolRounds: normalizeAgentMaxToolRounds(record.agentMaxToolRounds),
     agentWebSearch: typeof record.agentWebSearch === 'boolean' ? record.agentWebSearch : false,
@@ -740,13 +769,15 @@ export function normalizeSettings(input: Partial<AppSettings> | unknown): AppSet
 export function getAgentTextApiProfile(settings: Partial<AppSettings> | unknown): ApiProfile | null {
   const normalized = normalizeSettings(settings)
   if (normalized.agentApiConfigMode === 'off') return getActiveApiProfile(normalized)
-  return normalized.profiles.find((profile) => profile.id === normalized.agentTextProfileId) ?? null
+  const profile = normalized.profiles.find((item) => item.id === normalized.agentTextProfileId)
+  return profile ? resolveApiProfileModel(profile) : null
 }
 
 export function getAgentImageApiProfile(settings: Partial<AppSettings> | unknown): ApiProfile | null {
   const normalized = normalizeSettings(settings)
   if (normalized.agentApiConfigMode !== 'hybrid') return getAgentTextApiProfile(normalized)
-  return normalized.profiles.find((profile) => profile.id === normalized.agentImageProfileId) ?? null
+  const profile = normalized.profiles.find((item) => item.id === normalized.agentImageProfileId)
+  return profile ? resolveApiProfileModel(profile) : null
 }
 
 export function getCustomProviderDefinition(settings: Partial<AppSettings> | unknown, provider: ApiProvider): CustomProviderDefinition | null {
@@ -766,10 +797,32 @@ export function isOpenAICompatibleProvider(settings: Partial<AppSettings> | unkn
   return provider === 'openai' || Boolean(getCustomProviderDefinition(settings, provider))
 }
 
-export interface ImportedProviderSettings {
-  customProviders: CustomProviderDefinition[]
-  profiles: ApiProfile[]
+export interface ImportedProviderSettings extends PresetConfig {
   presetProfileFields?: Record<string, string[]>
+}
+
+export function normalizePresetAgent(value: unknown, profiles: ApiProfile[]): PresetAgentConfig | undefined {
+  if (value === undefined) return undefined
+  if (!isRecord(value)
+    || (value.apiConfigMode !== undefined && value.apiConfigMode !== 'off' && value.apiConfigMode !== 'native' && value.apiConfigMode !== 'hybrid')
+    || (value.textProfileId !== undefined && !profiles.some((profile) => profile.id === value.textProfileId && isAgentTextApiProfile(profile)))
+    || (value.imageProfileId !== undefined && !profiles.some((profile) => profile.id === value.imageProfileId))) {
+    console.warn('忽略无效的 Agent 预置配置：请检查模式及引用的配置 ID（文本配置必须使用 Responses API）')
+    return undefined
+  }
+  return {
+    ...(value.apiConfigMode !== undefined ? { apiConfigMode: value.apiConfigMode as AgentApiConfigMode } : {}),
+    ...(value.textProfileId !== undefined ? { textProfileId: value.textProfileId as string } : {}),
+    ...(value.imageProfileId !== undefined ? { imageProfileId: value.imageProfileId as string } : {}),
+  }
+}
+
+export function getPresetAgentSettings(agent: PresetAgentConfig | undefined): Partial<AppSettings> {
+  return {
+    ...(agent?.apiConfigMode !== undefined ? { agentApiConfigMode: agent.apiConfigMode } : {}),
+    ...(agent?.textProfileId !== undefined ? { agentTextProfileId: agent.textProfileId } : {}),
+    ...(agent?.imageProfileId !== undefined ? { agentImageProfileId: agent.imageProfileId } : {}),
+  }
 }
 
 function validateCustomProviderTaskMappings(providers: CustomProviderDefinition[]) {
@@ -803,12 +856,12 @@ export function importCustomProviderSettingsFromJson(
 
   const record = parsed as Record<string, unknown>
 
-  // 包裹结构：{customProviders: [...], profiles: [...]}
-  if (Array.isArray(record.customProviders)) {
+  // 包裹结构：profiles 可独立于自定义服务商配置导入。
+  if (Array.isArray(record.profiles) || Array.isArray(record.customProviders)) {
     if (options.deploymentConfig) validateDeploymentProviderIds(record.customProviders)
     const customProviders = normalizeCustomProviderDefinitions(record.customProviders)
-    if (customProviders.length === 0) {
-      if (!options.deploymentConfig) throw new Error('customProviders 数组中没有有效的服务商配置')
+    if (!options.deploymentConfig && Array.isArray(record.customProviders) && record.customProviders.length > 0 && !customProviders.length) {
+      throw new Error('customProviders 数组中没有有效的服务商配置')
     }
     validateCustomProviderTaskMappings(customProviders)
     const customProviderIds = new Set(customProviders.map((provider) => provider.id))
@@ -817,9 +870,11 @@ export function importCustomProviderSettingsFromJson(
     const profiles = profileEntries.map((entry) => entry.profile)
     if (!options.deploymentConfig) return { customProviders, profiles }
 
+    const agent = normalizePresetAgent(record.agent, profiles)
     return {
       customProviders,
       profiles,
+      ...(agent ? { agent } : {}),
       ...(profileEntries.length
         ? { presetProfileFields: Object.fromEntries(profileEntries.map((entry) => [entry.profile.id, Object.keys(entry.source)])) }
         : {}),
@@ -843,6 +898,22 @@ export function importCustomProviderDefinitionFromJson(jsonText: string, existin
   return result.customProviders[0]
 }
 
+/** 拆分模型列表，兼容中英文逗号并去重 */
+export function splitModelList(value: string) {
+  return Array.from(new Set(value.split(/[,，]/).map((item) => item.trim()).filter(Boolean)))
+}
+
+export function normalizeModelList(value: string) {
+  return splitModelList(value).join(', ')
+}
+
+/** 将模型列表解析为实际请求使用的单个模型，优先使用 preferred，其次是首页选中的模型 */
+export function resolveApiProfileModel(profile: ApiProfile, preferred?: string): ApiProfile {
+  const models = splitModelList(profile.model)
+  const model = [preferred, profile.selectedModel].find((item) => item && models.includes(item)) ?? models[0] ?? profile.model
+  return { ...profile, model }
+}
+
 export function getActiveApiProfile(settings: Partial<AppSettings> | unknown): ApiProfile {
   const record = settings && typeof settings === 'object' ? settings as Record<string, unknown> : {}
   const normalized = normalizeSettings(settings)
@@ -851,7 +922,7 @@ export function getActiveApiProfile(settings: Partial<AppSettings> | unknown): A
     ? record.apiMode
     : profile.apiMode
 
-  return {
+  return resolveApiProfileModel({
     ...profile,
     baseUrl: typeof record.baseUrl === 'string' ? record.baseUrl : profile.baseUrl,
     apiKey: typeof record.apiKey === 'string' ? record.apiKey : profile.apiKey,
@@ -862,7 +933,7 @@ export function getActiveApiProfile(settings: Partial<AppSettings> | unknown): A
     apiProxy: typeof record.apiProxy === 'boolean' ? record.apiProxy : profile.apiProxy,
     streamImages: profile.provider === 'openai' && typeof record.streamImages === 'boolean' ? record.streamImages : profile.streamImages,
     streamPartialImages: normalizeStreamPartialImages(record.streamPartialImages, profile.streamPartialImages),
-  }
+  })
 }
 
 export function validateApiProfile(profile: ApiProfile): string | null {
@@ -1108,10 +1179,10 @@ export function mergePresetImportedSettings(
     lockPresetParams?: boolean
     dismissedPresetProfileIds?: string[]
     dismissedPresetProviderIds?: string[]
-    previousPresetConfig?: Pick<AppSettings, 'customProviders' | 'profiles'> | null
+    previousPresetConfig?: PresetConfig | null
     usedPresetProfileIds?: string[]
   } = {},
-): { settings: AppSettings; presetConfig: Pick<AppSettings, 'customProviders' | 'profiles'> } {
+): { settings: AppSettings; presetConfig: PresetConfig } {
   const importedRecord = isRecord(importedSettings) ? importedSettings : {}
   validateDeploymentProviderIds(importedRecord.customProviders)
   const normalizedImported = normalizeSettings(importedSettings)
@@ -1217,9 +1288,15 @@ export function mergePresetImportedSettings(
     if (!sourceProfileIds.has(profile.id) && profiles.some((item) => item.id === profile.id)) presetProfiles.push(profile)
   }
 
+  const agent = normalizePresetAgent(importedRecord.agent, allSourceProfileEntries.map((entry) => entry.profile))
+  const previousAgentSettings = getPresetAgentSettings(options.previousPresetConfig?.agent)
+  const agentSettings = Object.fromEntries(Object.entries(getPresetAgentSettings(agent))
+    .filter(([key, value]) => options.lockPresetParams || value !== previousAgentSettings[key as keyof AppSettings]))
+
   return {
     settings: normalizeSettings({
       ...current,
+      ...agentSettings,
       customProviders,
       profiles,
       activeProfileId: replacingPristineDefault ? sourceDefaultProfileId ?? nextProfiles[0].id : current.activeProfileId,
@@ -1227,6 +1304,7 @@ export function mergePresetImportedSettings(
     presetConfig: {
       customProviders: presetProviders,
       profiles: presetProfiles,
+      ...(agent ? { agent } : {}),
     },
   }
 }
@@ -1247,10 +1325,20 @@ export const DEFAULT_SETTINGS: AppSettings = normalizeSettings({
   persistInputOnRestart: true,
   reuseTaskApiProfileTemporarily: false,
   alwaysShowRetryButton: false,
+  retryMode: 'new',
   allowPromptRewrite: false,
   taskCompletionNotification: false,
+  autoCheckUpdate: true,
+  writeLogFile: true,
   enterSubmit: false,
+  showBatchPrompt: false,
+  batchPromptEnabled: false,
+  batchPromptMode: 'queue',
+  batchPromptConcurrencyLimited: true,
+  batchPromptConcurrency: DEFAULT_BATCH_PROMPT_CONCURRENCY,
+  referenceImageEditAction: 'ask',
   zipDownloadRoutes: DEFAULT_ZIP_DOWNLOAD_ROUTES,
+  saveLocationMode: 'ask',
   agentScrollToBottomAfterSubmit: true,
   agentMaxToolRounds: DEFAULT_AGENT_MAX_TOOL_ROUNDS,
   agentWebSearch: false,

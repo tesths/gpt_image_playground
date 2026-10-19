@@ -19,6 +19,8 @@ import {
   mergeImportedSettings,
   normalizeApiProfile,
   normalizeSettings,
+  resolveApiProfileModel,
+  splitModelList,
   switchApiProfileProvider,
   validateApiProfile,
 } from './apiProfiles'
@@ -79,6 +81,24 @@ describe('normalizeApiProfile', () => {
 })
 
 describe('normalizeSettings', () => {
+  it('falls back to creating a new task for unknown retry modes', () => {
+    expect(normalizeSettings({}).retryMode).toBe('new')
+    expect(normalizeSettings({ retryMode: 'bogus' }).retryMode).toBe('new')
+    expect(normalizeSettings({ retryMode: 'overwriteFailed' }).retryMode).toBe('overwriteFailed')
+  })
+
+  it('only keeps overwriting any task while successful tasks show the retry button', () => {
+    expect(normalizeSettings({ retryMode: 'overwriteAll' }).retryMode).toBe('overwriteFailed')
+    expect(normalizeSettings({ retryMode: 'overwriteAll', alwaysShowRetryButton: true }).retryMode).toBe('overwriteAll')
+  })
+
+  it('defaults the save location mode to asking and drops invalid values', () => {
+    expect(DEFAULT_SETTINGS.saveLocationMode).toBe('ask')
+    expect(normalizeSettings({}).saveLocationMode).toBe('ask')
+    expect(normalizeSettings({ saveLocationMode: 'bogus' }).saveLocationMode).toBe('ask')
+    expect(normalizeSettings({ saveLocationMode: 'default' }).saveLocationMode).toBe('default')
+  })
+
   it('preserves a non-empty profile description and removes an empty one', () => {
     const settings = normalizeSettings({
       profiles: [
@@ -89,6 +109,25 @@ describe('normalizeSettings', () => {
 
     expect(settings.profiles[0].description).toBe('支持 **Markdown**')
     expect(settings.profiles[1].description).toBeUndefined()
+  })
+
+  it('defaults font settings to following the deployment for old data', () => {
+    const settings = normalizeSettings({ enterSubmit: true })
+
+    expect(settings.uiFont).toBe('default')
+    expect(settings.uiFontName).toBe('')
+    expect(settings.monoFont).toBe('default')
+    expect(settings.monoFontName).toBe('')
+  })
+
+  it('keeps valid font settings and drops invalid ones', () => {
+    const settings = normalizeSettings({ uiFont: 'custom', uiFontName: '  Source Han Sans SC ', monoFont: 'bogus', monoFontName: 42 })
+
+    expect(settings.uiFont).toBe('custom')
+    expect(settings.uiFontName).toBe('Source Han Sans SC')
+    expect(settings.monoFont).toBe('default')
+    expect(settings.monoFontName).toBe('')
+    expect(normalizeSettings({ monoFont: 'builtin' }).monoFont).toBe('builtin')
   })
 })
 
@@ -1676,5 +1715,24 @@ describe('custom providers', () => {
     expect(restoredProfile.baseUrl).toBe('https://api.compat.example.com/v1')
     expect(restoredProfile.model).toBe('custom-openai-model')
     expect(restoredProfile.apiProxy).toBe(false)
+  })
+})
+
+describe('model list', () => {
+  it('normalizes comma separated models', () => {
+    expect(splitModelList('a,b ，c, a,')).toEqual(['a', 'b', 'c'])
+    expect(normalizeApiProfile({ model: 'a,b ，c' }).model).toBe('a, b, c')
+  })
+
+  it('resolves selected model and falls back to the first one', () => {
+    const profile = normalizeApiProfile({ model: 'a, b', selectedModel: 'b' })
+    expect(resolveApiProfileModel(profile).model).toBe('b')
+    expect(resolveApiProfileModel(profile, 'a').model).toBe('a')
+    expect(resolveApiProfileModel({ ...profile, selectedModel: 'x' }).model).toBe('a')
+  })
+
+  it('returns the selected model for the active profile', () => {
+    const profile = normalizeApiProfile({ id: 'p1', model: 'a,b', selectedModel: 'b' })
+    expect(getActiveApiProfile({ profiles: [profile], activeProfileId: 'p1' }).model).toBe('b')
   })
 })

@@ -1,6 +1,6 @@
 import type { AppSettings, ResponsesOutputItem, TaskParams } from '../types'
 import { blobToDataUrl } from './dataUrl'
-import { readRuntimeEnv } from './runtimeEnv'
+import { apiFetch, isTauri } from './platform'
 
 export const MIME_MAP: Record<string, string> = {
   png: 'image/png',
@@ -106,18 +106,12 @@ export function assertMaskEditFileSize(label: string, bytes: number) {
   assertMaxBytes(label, bytes, MAX_MASK_EDIT_FILE_BYTES)
 }
 
+const IMAGE_TOOL_DROPPED_ERROR = /Tool choice 'required' must be specified with 'tools' parameter\./i
+export const IMAGE_TOOL_DROPPED_HINT = '提示：当前使用的 API 可能未正确转发图像生成工具，请尝试更换支持该工具的接口或模型。'
 export const IMAGE_FETCH_CORS_HINT = ' 可点链接按钮复制结果链接，或尝试开启「返回 Base64 图片数据」避免此问题。'
 export const STREAMING_UNSUPPORTED_HINT = '提示：当前使用的 API 可能不支持流式传输，请尝试关闭「流式传输」功能。'
 export const STREAMING_FORMAT_HINT = '提示：API 返回了无法解析的流式数据格式，请尝试关闭「流式传输」功能。'
 export const TRANSPARENT_BACKGROUND_UNSUPPORTED_HINT = '提示：当前使用的 API 不支持为该模型使用原生透明背景，请将「透明背景实现方式」切换为「本地后处理」。'
-
-function isImageProxyAvailable(): boolean {
-  return readRuntimeEnv(import.meta.env.VITE_IMAGE_PROXY_AVAILABLE) === 'true'
-}
-
-function buildImageProxyUrl(url: string): string {
-  return `/api/image-proxy?url=${encodeURIComponent(url)}`
-}
 
 export function appendStreamingUnsupportedHint(message: string): string {
   return message ? `${message}\n${STREAMING_UNSUPPORTED_HINT}` : STREAMING_UNSUPPORTED_HINT
@@ -132,10 +126,22 @@ export function maybeAppendTransparentBackgroundHint(message: string): string {
   return `${message}\n${TRANSPARENT_BACKGROUND_UNSUPPORTED_HINT}`
 }
 
+/** 部分 API 转发 Responses 请求时会丢弃 image_generation 工具，却保留 tool_choice，服务端因此报错 */
+export function maybeAppendImageToolDroppedHint(message: string): string {
+  if (!IMAGE_TOOL_DROPPED_ERROR.test(message)) return message
+  return `${message}\n${IMAGE_TOOL_DROPPED_HINT}`
+}
+
+/** 请求超时中止时使用的原因，替代浏览器默认的英文“signal is aborted without reason”；仍为 AbortError，不改变错误分类 */
+export function createRequestTimeoutError(timeoutSeconds: number) {
+  return new DOMException(`请求超时：超过 ${timeoutSeconds} 秒仍未完成，请稍后重试或提高超时时间。`, 'AbortError')
+}
+
 /** 排除明确与流式无关的状态码后追加提示 */
 export function maybeAppendStreamingHint(message: string, status: number, streamImages?: boolean): string {
   const transparentMessage = maybeAppendTransparentBackgroundHint(message)
   if (transparentMessage !== message) return transparentMessage
+  if (IMAGE_TOOL_DROPPED_ERROR.test(message)) return message
   if (!streamImages) return message
   if (status === 401 || status === 403 || status === 404 || status === 408 || status === 429 || status >= 500) {
     return message
@@ -166,23 +172,22 @@ export async function fetchImageUrlAsDataUrl(url: string, fallbackMime: string, 
 
   let response: Response
   try {
-    response = await fetch(url, {
+    response = await apiFetch(url, {
       cache: 'no-store',
       signal,
     })
   } catch (err) {
     if (err instanceof TypeError) {
-      if (isImageProxyAvailable()) {
+      if (import.meta.env.VITE_IMAGE_PROXY_AVAILABLE === 'true') {
         try {
-          response = await fetch(buildImageProxyUrl(url), {
-            cache: 'no-store',
-            signal,
-          })
+          response = await apiFetch(`/api/image-proxy?url=${encodeURIComponent(url)}`, { signal })
         } catch (proxyErr) {
           const message = proxyErr instanceof Error ? proxyErr.message : String(proxyErr)
-          throw new Error(`图片已生成，但通过同源代理下载失败：${message}。${IMAGE_FETCH_CORS_HINT}`)
+          throw new Error(`图片已生成，但通过同源代理下载失败：${message}。`)
         }
       } else {
+        // 客户端由 Rust 侧发出请求，不存在跨域问题，也不需要 no-cors 探测
+        if (isTauri) throw new Error(`图片链接下载失败（可能因链接过期或网络异常）。${IMAGE_FETCH_CORS_HINT}`)
         const probe = await probeNoCorsReachability(url)
         if (probe === 'opaque') {
           throw new Error(`图片已生成，但因服务商未允许跨域，图片链接下载失败。${IMAGE_FETCH_CORS_HINT}`)
